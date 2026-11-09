@@ -35,3 +35,10 @@
 - GPU readings poll `gpu_busy_percent` every sample. On laptops with a
   runtime-suspended discrete AMD GPU, that read may wake the GPU and
   cost battery. Not checked; this machine is a desktop.
+- With the "cpu lazy" sort, short-lived processes (here a `kubectl`
+  spawned every ~5 s) briefly rank near the top. Their lifetime average
+  is high because they are young, and each one pushes every row below
+  it down a line. btop behaves the same. A minimum age in the lifetime
+  average would damp it.
+- The `Cpu%` column shows current usage while "cpu lazy" sorts by
+  lifetime usage, so the column doesn't look sorted. btop does the same.

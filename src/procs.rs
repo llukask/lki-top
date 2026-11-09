@@ -209,26 +209,55 @@ pub enum SortColumn {
     User,
     Threads,
     Memory,
-    Cpu,
+    /// btop's default: busiest over each process's lifetime, with the
+    /// processes busy right now pulled up. Rows hardly move between
+    /// refreshes. See [`promote_busy`].
+    CpuLazy,
+    /// Busiest since the last refresh. Rows with close loads swap places
+    /// on every refresh.
+    CpuDirect,
 }
 
 impl SortColumn {
     /// Left-to-right order of the table's columns, which is also the
     /// order the sort-cycling keys walk through.
-    pub const ALL: [SortColumn; 6] = [
+    pub const ALL: [SortColumn; 7] = [
         SortColumn::Pid,
         SortColumn::Name,
         SortColumn::User,
         SortColumn::Threads,
         SortColumn::Memory,
-        SortColumn::Cpu,
+        SortColumn::CpuLazy,
+        SortColumn::CpuDirect,
     ];
+
+    /// btop's names for the sort orders.
+    pub fn label(self) -> &'static str {
+        match self {
+            SortColumn::Pid => "pid",
+            SortColumn::Name => "program",
+            SortColumn::User => "user",
+            SortColumn::Threads => "threads",
+            SortColumn::Memory => "memory",
+            SortColumn::CpuLazy => "cpu lazy",
+            SortColumn::CpuDirect => "cpu direct",
+        }
+    }
+
+    /// The column whose header shows this sort. Both CPU sorts sit
+    /// under the one `Cpu%` header.
+    pub fn header(self) -> SortColumn {
+        match self {
+            SortColumn::CpuDirect => SortColumn::CpuLazy,
+            column => column,
+        }
+    }
 
     /// Numbers read best largest-first, text alphabetically.
     fn natural_descending(self) -> bool {
         matches!(
             self,
-            SortColumn::Threads | SortColumn::Memory | SortColumn::Cpu
+            SortColumn::Threads | SortColumn::Memory | SortColumn::CpuLazy | SortColumn::CpuDirect
         )
     }
 
@@ -278,7 +307,8 @@ impl SortOrder {
             SortColumn::User => a.user.cmp(&b.user),
             SortColumn::Threads => a.threads.cmp(&b.threads),
             SortColumn::Memory => a.memory.cmp(&b.memory),
-            SortColumn::Cpu => a.cpu.total_cmp(&b.cpu),
+            SortColumn::CpuLazy => a.lifetime_cpu.total_cmp(&b.lifetime_cpu),
+            SortColumn::CpuDirect => a.cpu.total_cmp(&b.cpu),
         };
         let by_key = if self.descending {
             by_key.reverse()
@@ -299,6 +329,11 @@ fn arrange(processes: &[ProcessSample], filter: &str, order: SortOrder) -> Vec<R
         .filter(|&index| needle.is_empty() || matches(&processes[index], &needle))
         .collect();
     indices.sort_by(|&a, &b| order.compare(&processes[a], &processes[b]));
+    // Like btop, only the flat list in its natural direction gets busy
+    // processes pulled up; tree view sorts siblings by lifetime alone.
+    if order.column == SortColumn::CpuLazy && order.descending {
+        promote_busy(&mut indices, |index| processes[index].cpu);
+    }
     indices
         .into_iter()
         .map(|index| Row {
@@ -307,6 +342,48 @@ fn arrange(processes: &[ProcessSample], filter: &str, order: SortOrder) -> Vec<R
             fold: Fold::Leaf,
         })
         .collect()
+}
+
+/// The second half of btop's "cpu lazy" sort, after `proc_sorter` in
+/// btop 1.4.8's `src/btop_shared.cpp`. `order` is sorted by lifetime CPU
+/// share, which hides a long-running process that just got busy. This
+/// moves processes busy right now (`current`, a share of the whole
+/// machine) up, just below the run of busy ones already at the top.
+///
+/// Within the first six rows, "busy" means over 30%. Below them it means
+/// busier than the busiest of those six if that one is over 30%, and over
+/// 10% otherwise. At most 11 processes move, which keeps the order from
+/// churning. A process promoted later lands above earlier ones, as in
+/// btop.
+fn promote_busy(order: &mut [usize], current: impl Fn(usize) -> f32) {
+    const BUSY: f32 = 0.30;
+    const QUIET: f32 = 0.10;
+    const MAX_PROMOTED: usize = 11;
+    let mut busiest_near_top = QUIET;
+    let mut threshold = BUSY;
+    let mut leading_busy = 0;
+    let mut promoted = 0;
+    for row in 0..order.len() {
+        let cpu = current(order[row]);
+        if row <= 5 && cpu > busiest_near_top {
+            busiest_near_top = cpu;
+        } else if row == 6 {
+            threshold = if busiest_near_top > BUSY {
+                busiest_near_top
+            } else {
+                QUIET
+            };
+        }
+        if row == leading_busy && cpu > BUSY {
+            leading_busy += 1;
+        } else if cpu > threshold {
+            order[leading_busy..=row].rotate_right(1);
+            promoted += 1;
+            if promoted == MAX_PROMOTED {
+                break;
+            }
+        }
+    }
 }
 
 /// Processes as a parent/child tree, depth first, siblings sorted by
@@ -486,6 +563,15 @@ mod tests {
             threads: 1,
             memory: u64::from(pid) * 1024,
             cpu,
+            lifetime_cpu: cpu,
+        }
+    }
+
+    /// A process whose current load differs from its lifetime average.
+    fn busy(pid: u32, lifetime_cpu: f32, cpu: f32) -> ProcessSample {
+        ProcessSample {
+            lifetime_cpu,
+            ..process(pid, "worker", cpu)
         }
     }
 
@@ -541,9 +627,76 @@ mod tests {
                 process(1, "a", 0.5),
                 process(2, "b", 0.1),
             ],
-            SortColumn::Cpu,
+            SortColumn::CpuDirect,
         );
         assert_eq!(pids(&table), [1, 2, 3]);
+    }
+
+    #[test]
+    fn lazy_sort_ignores_short_spikes_below_the_threshold() {
+        // Process 3 is momentarily busier than 1 and 2, but under 10% of
+        // the machine, so the lifetime order holds.
+        let table = table(
+            vec![
+                busy(1, 0.05, 0.01),
+                busy(2, 0.04, 0.02),
+                busy(3, 0.01, 0.08),
+            ],
+            SortColumn::CpuLazy,
+        );
+        assert_eq!(pids(&table), [1, 2, 3]);
+    }
+
+    #[test]
+    fn lazy_sort_pulls_busy_processes_up() {
+        // Process 9 is quiet over its lifetime but busy now, and busier
+        // than anything near the top, so it moves to just below the busy
+        // run at the top (process 1).
+        let mut processes = vec![busy(1, 0.50, 0.40)];
+        processes.extend((2..=8).map(|pid| busy(pid, 0.10 - pid as f32 * 0.01, 0.0)));
+        processes.push(busy(9, 0.001, 0.50));
+        let table = table(processes, SortColumn::CpuLazy);
+        assert_eq!(pids(&table), [1, 9, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn a_busy_process_near_the_top_raises_the_bar_below() {
+        // Process 1 runs at 40%, so below the first six rows only a
+        // process busier than that moves up: 8 does, 7 doesn't.
+        let mut processes = vec![busy(1, 0.9, 0.40)];
+        processes.extend((2..=6).map(|pid| busy(pid, 0.8 - pid as f32 * 0.01, 0.0)));
+        processes.push(busy(7, 0.05, 0.35));
+        processes.push(busy(8, 0.04, 0.45));
+        let table = table(processes, SortColumn::CpuLazy);
+        assert_eq!(pids(&table), [1, 8, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn lazy_sort_promotes_at_most_eleven() {
+        // The top six are idle, so below them anything over 10% counts.
+        let mut processes: Vec<_> = (1..=6)
+            .map(|pid| busy(pid, 0.9 - pid as f32 * 0.01, 0.0))
+            .collect();
+        processes.extend((7..=26).map(|pid| busy(pid, 0.5 - pid as f32 * 0.01, 0.2)));
+        let table = table(processes, SortColumn::CpuLazy);
+        // The 11 that moved sit on top, the last one moved first.
+        let shown = pids(&table);
+        assert_eq!(shown[..11], [17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7]);
+        assert_eq!(shown[11..17], [1, 2, 3, 4, 5, 6]);
+        assert_eq!(shown[17..], [18, 19, 20, 21, 22, 23, 24, 25, 26]);
+    }
+
+    #[test]
+    fn reversed_lazy_sort_is_plain_lifetime_order() {
+        let mut table = table(
+            vec![busy(1, 0.5, 0.0), busy(2, 0.001, 0.9), busy(3, 0.2, 0.0)],
+            SortColumn::CpuLazy,
+        );
+        // Descending, the busy process 2 is pulled up past both...
+        assert_eq!(pids(&table), [2, 1, 3]);
+        // ...but ascending is lifetime order alone, as in btop.
+        table.set_sort(table.sort().toggled(SortColumn::CpuLazy));
+        assert_eq!(pids(&table), [2, 3, 1]);
     }
 
     #[test]
@@ -593,7 +746,7 @@ mod tests {
         );
         table.select_pid(1);
 
-        table.set_sort(SortOrder::by(SortColumn::Cpu));
+        table.set_sort(SortOrder::by(SortColumn::CpuDirect));
         assert_eq!(table.selected_index(), Some(1));
     }
 
@@ -654,7 +807,7 @@ mod tests {
 
     #[test]
     fn step_wraps_around() {
-        assert_eq!(SortColumn::Pid.step(-1), SortColumn::Cpu);
-        assert_eq!(SortColumn::Cpu.step(1), SortColumn::Pid);
+        assert_eq!(SortColumn::Pid.step(-1), SortColumn::CpuDirect);
+        assert_eq!(SortColumn::CpuDirect.step(1), SortColumn::Pid);
     }
 }

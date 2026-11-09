@@ -85,6 +85,9 @@ pub struct ProcessSample {
     /// fully used core; dividing by the core count makes a process that
     /// saturates the whole machine read 100%, which is btop's default.
     pub cpu: f32,
+    /// Average share of total CPU capacity since the process started,
+    /// for the "cpu lazy" sort.
+    pub lifetime_cpu: f32,
 }
 
 pub struct Sampler {
@@ -278,6 +281,13 @@ impl Sampler {
                 threads: process.tasks().map_or(1, |tasks| tasks.len().max(1)),
                 memory: process.memory(),
                 cpu: process.cpu_usage() / 100.0 / core_count,
+                // CPU-milliseconds over wall seconds, a fraction of one
+                // core, then of the machine. A process younger than a
+                // second counts as one second old.
+                lifetime_cpu: process.accumulated_cpu_time() as f32
+                    / 1000.0
+                    / process.run_time().max(1) as f32
+                    / core_count,
             });
         }
         processes

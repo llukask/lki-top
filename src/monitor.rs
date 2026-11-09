@@ -349,7 +349,7 @@ impl Monitor {
             disk_io: HashMap::new(),
             tx_history: History::new(HISTORY_LEN),
             memory_histories: std::array::from_fn(|_| History::new(HISTORY_LEN)),
-            table: ProcessTable::new(SortOrder::by(SortColumn::Cpu)),
+            table: ProcessTable::new(SortOrder::by(SortColumn::CpuLazy)),
             mode: Mode::Browse,
             rates: Rates::DEFAULT,
             rate_changes,
@@ -1180,7 +1180,10 @@ impl Monitor {
         let theme = &self.theme;
         let sort = self.table.sort();
         let header = |column: SortColumn, label: &'static str| {
-            let active = sort.column == column;
+            let active = sort.column.header() == column;
+            // Clicking the active header flips the sort it shows, so the
+            // `Cpu%` header keeps whichever CPU sort is on.
+            let target = if active { sort.column } else { column };
             let arrow = match (active, sort.descending) {
                 (false, _) => "",
                 (true, true) => "↓",
@@ -1192,7 +1195,7 @@ impl Monitor {
                 .text_color(if active { theme.highlight } else { theme.title })
                 .child(format!("{label}{arrow}"))
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.set_sort(this.table.sort().toggled(column), cx);
+                    this.set_sort(this.table.sort().toggled(target), cx);
                 }))
         };
         Self::process_columns(
@@ -1207,7 +1210,7 @@ impl Monitor {
             header(SortColumn::Threads, "Thr").flex().justify_end(),
             header(SortColumn::User, "User"),
             header(SortColumn::Memory, "Mem").flex().justify_end(),
-            header(SortColumn::Cpu, "Cpu%").flex().justify_end(),
+            header(SortColumn::CpuLazy, "Cpu%").flex().justify_end(),
         )
     }
 
@@ -1372,13 +1375,13 @@ impl Monitor {
             theme.proc_box,
             Some(
                 format!(
-                    "{}{} by {:?}",
+                    "{}{} by {}",
                     match self.table.layout() {
                         Layout::Flat => "",
                         Layout::Tree => "tree · ",
                     },
                     sort_label(self.table.sort()),
-                    self.table.sort().column
+                    self.table.sort().column.label()
                 )
                 .into(),
             ),
