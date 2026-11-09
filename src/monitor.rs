@@ -19,13 +19,76 @@ use crate::gpu::GpuSample;
 use crate::graph::{GraphStyle, Grow, graph, meter};
 use crate::history::History;
 use crate::procs::{Fold, Layout, ProcessTable, SortColumn, SortOrder};
-use crate::sample::{DiskSample, MemorySample, Sampler, Snapshot};
+use crate::sample::{DiskSample, MemorySample, ProcessSample, Sampler, Snapshot};
 use crate::theme::{self, Gradient, Theme};
 
-/// Sampling intervals that `+` and `-` step through. The shortest stays
-/// above sysinfo's 200 ms minimum between CPU readings.
+/// Process list refresh intervals that `+` and `-` step through.
 const INTERVALS_MS: [u64; 6] = [250, 500, 1000, 2000, 3000, 5000];
-const DEFAULT_INTERVAL: usize = 2;
+/// Graphs never sample faster than this, which stays above sysinfo's
+/// 200 ms minimum between CPU readings.
+const MIN_GRAPH_INTERVAL_MS: u64 = 250;
+const MAX_GRAPHS_PER_REFRESH: u32 = 8;
+
+/// How often the sampling loop runs. The process list refreshes every
+/// [`Rates::process_interval`]; graphs and meters sample
+/// [`Rates::graphs_per_refresh`] times in that interval, since reading
+/// every process costs far more than everything else together.
+#[derive(Debug, Clone, Copy)]
+struct Rates {
+    /// Index into [`INTERVALS_MS`].
+    process_step: usize,
+    /// What the user asked for with `[` and `]`. Short process intervals
+    /// can't fit that many graph samples, so it is clamped where used
+    /// and comes back once the interval is long enough again.
+    wanted_graphs_per_refresh: u32,
+}
+
+impl Rates {
+    const DEFAULT: Self = Self {
+        process_step: 2,
+        wanted_graphs_per_refresh: 2,
+    };
+
+    fn process_interval(self) -> Duration {
+        Duration::from_millis(INTERVALS_MS[self.process_step])
+    }
+
+    fn max_graphs_per_refresh(self) -> u32 {
+        let fits = INTERVALS_MS[self.process_step] / MIN_GRAPH_INTERVAL_MS;
+        (fits as u32).clamp(1, MAX_GRAPHS_PER_REFRESH)
+    }
+
+    fn graphs_per_refresh(self) -> u32 {
+        self.wanted_graphs_per_refresh
+            .min(self.max_graphs_per_refresh())
+    }
+
+    fn graph_interval(self) -> Duration {
+        self.process_interval() / self.graphs_per_refresh()
+    }
+
+    fn step_process_interval(self, delta: isize) -> Self {
+        Self {
+            process_step: self
+                .process_step
+                .saturating_add_signed(delta)
+                .min(INTERVALS_MS.len() - 1),
+            ..self
+        }
+    }
+
+    /// Steps from the count in effect, not the wanted one, so each press
+    /// changes what is on screen.
+    fn step_graphs_per_refresh(self, delta: i32) -> Self {
+        Self {
+            wanted_graphs_per_refresh: self
+                .graphs_per_refresh()
+                .saturating_add_signed(delta)
+                .clamp(1, self.max_graphs_per_refresh()),
+            ..self
+        }
+    }
+}
 /// Ten minutes at one sample a second, wider than any graph on a 4K
 /// screen at 3 px per sample.
 const HISTORY_LEN: usize = 600;
@@ -70,6 +133,8 @@ actions!(
         Cancel,
         LongerInterval,
         ShorterInterval,
+        MoreGraphSamples,
+        FewerGraphSamples,
         ToggleTree,
         ToggleFold,
         NextTheme,
@@ -168,6 +233,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-=", LongerInterval, browse),
         KeyBinding::new("=", LongerInterval, browse),
         KeyBinding::new("-", ShorterInterval, browse),
+        KeyBinding::new("]", MoreGraphSamples, browse),
+        KeyBinding::new("[", FewerGraphSamples, browse),
         KeyBinding::new("down", SelectNext, filter),
         KeyBinding::new("up", SelectPrevious, filter),
         KeyBinding::new("enter", CommitFilter, filter),
@@ -193,11 +260,10 @@ pub struct Monitor {
     memory_histories: [History; MemoryStat::ALL.len()],
     table: ProcessTable,
     mode: Mode,
-    /// Index into [`INTERVALS_MS`].
-    interval_step: usize,
-    /// Tells the sampling loop about a new interval, so a change applies
-    /// to the wait already in progress.
-    interval_changes: mpsc::UnboundedSender<Duration>,
+    rates: Rates,
+    /// Tells the sampling loop about new rates, so a change applies to
+    /// the wait already in progress.
+    rate_changes: mpsc::UnboundedSender<Rates>,
     /// Result of the last signal sent, shown in the process box footer.
     status: Option<SharedString>,
     theme: Theme,
@@ -210,8 +276,11 @@ pub struct Monitor {
 
 impl Monitor {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let (interval_changes, mut new_intervals) = mpsc::unbounded();
-        let mut interval = Duration::from_millis(INTERVALS_MS[DEFAULT_INTERVAL]);
+        let (rate_changes, mut new_rates) = mpsc::unbounded();
+        let mut rates = Rates::DEFAULT;
+        // Counts graph samples; the process list refreshes on every
+        // `graphs_per_refresh`-th one, starting with the first.
+        let mut tick: u32 = 0;
         cx.spawn(async move |this, cx| {
             let mut sampler = cx
                 .background_executor()
@@ -222,36 +291,43 @@ impl Monitor {
                 .timer(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL)
                 .await;
             loop {
-                let (returned, snapshot) = cx
+                let with_processes = tick.is_multiple_of(rates.graphs_per_refresh());
+                tick = tick.wrapping_add(1);
+                let (returned, snapshot, processes) = cx
                     .background_executor()
                     .spawn(async move {
                         let snapshot = sampler.sample();
-                        (sampler, snapshot)
+                        let processes = with_processes.then(|| sampler.sample_processes());
+                        (sampler, snapshot, processes)
                     })
                     .await;
                 sampler = returned;
                 // `update` fails once the window and this view are gone.
                 if this
-                    .update(cx, |this, cx| this.ingest(snapshot, cx))
+                    .update(cx, |this, cx| this.ingest(snapshot, processes, cx))
                     .is_err()
                 {
                     return;
                 }
 
-                // Wait until `interval` after this sample. A rate change
+                // Wait one graph interval after this sample. A rate change
                 // restarts the wait with the new interval, still counted
                 // from the same sample, so going from 5 s to 250 ms takes
-                // effect immediately instead of after the old 5 s.
+                // effect immediately instead of after the old 5 s. It also
+                // restarts the count, so the process list follows at once.
                 let sampled_at = Instant::now();
                 loop {
-                    let remaining = interval.saturating_sub(sampled_at.elapsed());
+                    let remaining = rates.graph_interval().saturating_sub(sampled_at.elapsed());
                     if remaining.is_zero() {
                         break;
                     }
                     let timer = cx.background_executor().timer(remaining);
-                    match future::select(timer, new_intervals.next()).await {
+                    match future::select(timer, new_rates.next()).await {
                         Either::Left(_) => break,
-                        Either::Right((Some(changed), _)) => interval = changed,
+                        Either::Right((Some(changed), _)) => {
+                            rates = changed;
+                            tick = 0;
+                        }
                         // The sender lives in the view, so the view is gone.
                         Either::Right((None, _)) => return,
                     }
@@ -275,8 +351,8 @@ impl Monitor {
             memory_histories: std::array::from_fn(|_| History::new(HISTORY_LEN)),
             table: ProcessTable::new(SortOrder::by(SortColumn::Cpu)),
             mode: Mode::Browse,
-            interval_step: DEFAULT_INTERVAL,
-            interval_changes,
+            rates: Rates::DEFAULT,
+            rate_changes,
             status: None,
             theme,
             themes,
@@ -286,9 +362,14 @@ impl Monitor {
         }
     }
 
-    /// The process list moves into `table`, which owns it from here on;
-    /// the rest of the snapshot stays for the other boxes.
-    fn ingest(&mut self, mut snapshot: Snapshot, cx: &mut Context<Self>) {
+    /// A process list, when this sample includes one, moves into `table`,
+    /// which owns it from here on; the snapshot stays for the other boxes.
+    fn ingest(
+        &mut self,
+        snapshot: Snapshot,
+        processes: Option<Vec<ProcessSample>>,
+        cx: &mut Context<Self>,
+    ) {
         self.cpu_history.push(snapshot.cpu.total);
         let cores = &snapshot.cpu.per_core;
         self.core_histories
@@ -318,7 +399,9 @@ impl Monitor {
         for (stat, history) in MemoryStat::ALL.iter().zip(&mut self.memory_histories) {
             history.push(stat.share(snapshot.memory));
         }
-        self.table.replace(std::mem::take(&mut snapshot.processes));
+        if let Some(processes) = processes {
+            self.table.replace(processes);
+        }
         self.snapshot = Some(snapshot);
         cx.notify();
     }
@@ -459,33 +542,33 @@ impl Monitor {
         cx.notify();
     }
 
-    fn interval(&self) -> u64 {
-        INTERVALS_MS[self.interval_step]
-    }
-
-    fn step_interval(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let step = self
-            .interval_step
-            .saturating_add_signed(delta)
-            .min(INTERVALS_MS.len() - 1);
-        if step == self.interval_step {
-            return;
-        }
-        self.interval_step = step;
+    fn set_rates(&mut self, rates: Rates, cx: &mut Context<Self>) {
+        self.rates = rates;
         // Fails only once the sampling loop has stopped, and then there
         // is nothing left to retime.
-        let _ = self
-            .interval_changes
-            .unbounded_send(Duration::from_millis(self.interval()));
+        let _ = self.rate_changes.unbounded_send(rates);
         cx.notify();
     }
 
     fn longer_interval(&mut self, _: &LongerInterval, _: &mut Window, cx: &mut Context<Self>) {
-        self.step_interval(1, cx);
+        self.set_rates(self.rates.step_process_interval(1), cx);
     }
 
     fn shorter_interval(&mut self, _: &ShorterInterval, _: &mut Window, cx: &mut Context<Self>) {
-        self.step_interval(-1, cx);
+        self.set_rates(self.rates.step_process_interval(-1), cx);
+    }
+
+    fn more_graph_samples(&mut self, _: &MoreGraphSamples, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_rates(self.rates.step_graphs_per_refresh(1), cx);
+    }
+
+    fn fewer_graph_samples(
+        &mut self,
+        _: &FewerGraphSamples,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_rates(self.rates.step_graphs_per_refresh(-1), cx);
     }
 
     fn toggle_tree(&mut self, _: &ToggleTree, _: &mut Window, cx: &mut Context<Self>) {
@@ -615,9 +698,10 @@ impl Monitor {
         let cpu = &snapshot.cpu;
         let clock = jiff::Zoned::now().strftime("%H:%M:%S").to_string();
         let right = format!(
-            "up {} · {clock} · every {} ms",
+            "up {} · {clock} · procs {} ms · graphs {} ms",
             uptime(snapshot.uptime_secs),
-            self.interval()
+            self.rates.process_interval().as_millis(),
+            self.rates.graph_interval().as_millis(),
         );
 
         // Cores fill columns of at most eight, like btop's core grid.
@@ -1265,7 +1349,7 @@ impl Monitor {
                 Mode::Browse => div()
                     .text_color(theme.muted)
                     .child(self.status.clone().unwrap_or_else(|| {
-                        "f filter · ←/→ sort · r reverse · e tree · space fold · +/- rate · c theme · t term · K kill".into()
+                        "f filter · ←/→ sort · r reverse · e tree · space fold · +/- rate · [/] graph rate · c theme · t term · K kill".into()
                     }))
                     .into_any_element(),
             };
@@ -1347,6 +1431,8 @@ impl Render for Monitor {
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::longer_interval))
             .on_action(cx.listener(Self::shorter_interval))
+            .on_action(cx.listener(Self::more_graph_samples))
+            .on_action(cx.listener(Self::fewer_graph_samples))
             .on_action(cx.listener(Self::toggle_tree))
             .on_action(cx.listener(Self::toggle_fold))
             .on_action(cx.listener(Self::next_theme))
@@ -1515,5 +1601,46 @@ fn uptime(secs: u64) -> String {
         format!("{days}d {hours}h {minutes}m")
     } else {
         format!("{hours}h {minutes}m")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn intervals(rates: Rates) -> (u128, u128) {
+        (
+            rates.process_interval().as_millis(),
+            rates.graph_interval().as_millis(),
+        )
+    }
+
+    #[test]
+    fn graphs_sample_several_times_per_process_refresh() {
+        assert_eq!(intervals(Rates::DEFAULT), (1000, 500));
+        let more = Rates::DEFAULT.step_graphs_per_refresh(1);
+        assert_eq!(intervals(more), (1000, 333));
+        let slower = Rates::DEFAULT.step_process_interval(1);
+        assert_eq!(intervals(slower), (2000, 1000));
+    }
+
+    #[test]
+    fn graph_interval_never_drops_below_the_minimum() {
+        // At 1 s, four graph samples already take 250 ms each.
+        let capped = Rates::DEFAULT
+            .step_graphs_per_refresh(1)
+            .step_graphs_per_refresh(1)
+            .step_graphs_per_refresh(1);
+        assert_eq!(intervals(capped), (1000, 250));
+        let fastest = Rates::DEFAULT.step_process_interval(-2);
+        assert_eq!(intervals(fastest), (250, 250));
+    }
+
+    #[test]
+    fn clamped_choice_comes_back_with_a_longer_interval() {
+        let round_trip = Rates::DEFAULT
+            .step_process_interval(-2)
+            .step_process_interval(2);
+        assert_eq!(intervals(round_trip), (1000, 500));
     }
 }

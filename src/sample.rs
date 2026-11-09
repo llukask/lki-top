@@ -1,6 +1,7 @@
 //! Reading the system. [`Sampler`] owns the sysinfo handles and turns
-//! each refresh into a plain [`Snapshot`] the UI can render without
-//! touching sysinfo again.
+//! each refresh into plain data the UI can render without touching
+//! sysinfo again: a [`Snapshot`] for the graphs and meters, and the
+//! process list, which is costlier and read less often.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -20,7 +21,6 @@ pub struct Snapshot {
     pub network: NetworkSample,
     pub disks: Vec<DiskSample>,
     pub gpus: Vec<GpuSample>,
-    pub processes: Vec<ProcessSample>,
     pub load_average: [f64; 3],
     pub uptime_secs: u64,
 }
@@ -89,6 +89,12 @@ pub struct ProcessSample {
 
 pub struct Sampler {
     system: System,
+    /// Processes live in a `System` of their own. sysinfo divides each
+    /// process's CPU time by the CPU time that passed since its
+    /// `System` last read `/proc/stat`. The graphs read that more often
+    /// than the process list refreshes, which would inflate every
+    /// process's CPU share if they shared one.
+    process_system: System,
     networks: Networks,
     disks: Disks,
     components: Components,
@@ -113,6 +119,7 @@ impl Sampler {
         );
         let mut sampler = Self {
             system,
+            process_system: System::new(),
             networks: Networks::new_with_refreshed_list(),
             disks: Disks::new_with_refreshed_list(),
             components: Components::new_with_refreshed_list(),
@@ -122,6 +129,7 @@ impl Sampler {
             last_refresh: Instant::now(),
         };
         sampler.sample();
+        sampler.sample_processes();
         sampler
     }
 
@@ -130,16 +138,6 @@ impl Sampler {
     pub fn sample(&mut self) -> Snapshot {
         self.system.refresh_cpu_all();
         self.system.refresh_memory();
-        self.system.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::nothing()
-                .with_cpu()
-                .with_memory()
-                .with_tasks()
-                .with_cmd(UpdateKind::OnlyIfNotSet)
-                .with_user(UpdateKind::OnlyIfNotSet),
-        );
         self.networks.refresh(true);
         self.disks.refresh(true);
         self.components.refresh(false);
@@ -158,7 +156,6 @@ impl Sampler {
             network: self.network(elapsed),
             disks: self.disks(elapsed),
             gpus: self.gpus.iter().filter_map(AmdGpu::sample).collect(),
-            processes: self.processes(),
             load_average: [load.one, load.five, load.fifteen],
             uptime_secs: System::uptime(),
         }
@@ -241,10 +238,22 @@ impl Sampler {
             .collect()
     }
 
-    fn processes(&mut self) -> Vec<ProcessSample> {
+    /// Process CPU usage is the delta since the previous call, so the
+    /// same minimum gap as [`Sampler::sample`] applies.
+    pub fn sample_processes(&mut self) -> Vec<ProcessSample> {
+        self.process_system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing()
+                .with_cpu()
+                .with_memory()
+                .with_tasks()
+                .with_cmd(UpdateKind::OnlyIfNotSet)
+                .with_user(UpdateKind::OnlyIfNotSet),
+        );
         let core_count = self.system.cpus().len().max(1) as f32;
-        let mut processes = Vec::with_capacity(self.system.processes().len());
-        for (pid, process) in self.system.processes() {
+        let mut processes = Vec::with_capacity(self.process_system.processes().len());
+        for (pid, process) in self.process_system.processes() {
             // sysinfo lists every thread of a process as a process of its
             // own on Linux. The thread count column covers them.
             if process.thread_kind() == Some(ThreadKind::Userland) {
