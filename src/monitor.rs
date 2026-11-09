@@ -1,6 +1,7 @@
 //! The window's one view: four btop-style boxes over the latest
 //! [`Snapshot`], fed by a sampling loop on the background executor.
 
+use std::collections::HashMap;
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
@@ -14,10 +15,11 @@ use gpui::{
     prelude::*, px, relative, uniform_list,
 };
 
+use crate::gpu::GpuSample;
 use crate::graph::{GraphStyle, Grow, graph, meter};
 use crate::history::History;
 use crate::procs::{Fold, Layout, ProcessTable, SortColumn, SortOrder};
-use crate::sample::{MemorySample, Sampler, Snapshot};
+use crate::sample::{DiskSample, MemorySample, Sampler, Snapshot};
 use crate::theme::{self, Gradient, Theme};
 
 /// Sampling intervals that `+` and `-` step through. The shortest stays
@@ -33,7 +35,11 @@ const CORE_HISTORY_LEN: usize = 32;
 /// graphs scale to the peak of what they show, so the window has to be
 /// known up front for the "Top" label to name that same peak.
 const NETWORK_WINDOW: usize = 120;
+/// Samples each disk's I/O graph shows. The graphs are narrow, so fewer
+/// samples than the network graphs keep single bursts readable.
+const DISK_IO_WINDOW: usize = 60;
 const ROW_HEIGHT: f32 = 18.0;
+const DISK_IO_HEIGHT: f32 = 32.0;
 const PAGE_ROWS: usize = 20;
 /// Approximate advance of one monospace character at `text_xs`. Column
 /// widths are given in characters so they line up with btop's grid.
@@ -179,6 +185,9 @@ pub struct Monitor {
     /// One per logical core, created with the first snapshot.
     core_histories: Vec<History>,
     rx_history: History,
+    /// Read and write rates per mount point, for the disks currently
+    /// mounted.
+    disk_io: HashMap<String, DiskIo>,
     tx_history: History,
     /// Indexed like [`MemoryStat::ALL`].
     memory_histories: [History; MemoryStat::ALL.len()],
@@ -261,6 +270,7 @@ impl Monitor {
             cpu_history: History::new(HISTORY_LEN),
             core_histories: Vec::new(),
             rx_history: History::new(HISTORY_LEN),
+            disk_io: HashMap::new(),
             tx_history: History::new(HISTORY_LEN),
             memory_histories: std::array::from_fn(|_| History::new(HISTORY_LEN)),
             table: ProcessTable::new(SortOrder::by(SortColumn::Cpu)),
@@ -287,6 +297,23 @@ impl Monitor {
             history.push(usage);
         }
         self.rx_history.push(snapshot.network.rx_per_sec as f32);
+        for disk in &snapshot.disks {
+            let io = self
+                .disk_io
+                .entry(disk.mount_point.clone())
+                .or_insert_with(|| DiskIo {
+                    read: History::new(DISK_IO_WINDOW),
+                    write: History::new(DISK_IO_WINDOW),
+                });
+            io.read.push(disk.read_per_sec as f32);
+            io.write.push(disk.write_per_sec as f32);
+        }
+        self.disk_io.retain(|mount_point, _| {
+            snapshot
+                .disks
+                .iter()
+                .any(|disk| &disk.mount_point == mount_point)
+        });
         self.tx_history.push(snapshot.network.tx_per_sec as f32);
         for (stat, history) in MemoryStat::ALL.iter().zip(&mut self.memory_histories) {
             history.push(stat.share(snapshot.memory));
@@ -581,49 +608,6 @@ impl Monitor {
             })
     }
 
-    /// One `label  value` line over a full-width meter with a percentage.
-    fn meter_row(&self, label: &str, value: String, fraction: f32, gradient: Gradient) -> Div {
-        let theme = &self.theme;
-        div()
-            .flex()
-            .flex_col()
-            .flex_shrink_0()
-            .child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .gap_2()
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(theme.muted)
-                            .child(label.to_owned()),
-                    )
-                    .child(div().flex_shrink_0().child(value)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .h(px(ROW_HEIGHT - 4.0))
-                    .child(div().flex_1().h_full().child(meter(
-                        fraction,
-                        gradient,
-                        theme.meter_empty,
-                    )))
-                    .child(
-                        div()
-                            .w(chars(4.0))
-                            .flex()
-                            .justify_end()
-                            .text_color(gradient.at(fraction))
-                            .child(format!("{:.0}%", fraction * 100.0)),
-                    ),
-            )
-    }
-
     // ----- Rendering: the four boxes -----
 
     fn render_cpu(&self, snapshot: &Snapshot) -> Div {
@@ -728,7 +712,8 @@ impl Monitor {
             .child(div().text_color(theme.muted).child(format!(
                 "Load avg {:.2} {:.2} {:.2}",
                 snapshot.load_average[0], snapshot.load_average[1], snapshot.load_average[2]
-            )));
+            )))
+            .children(self.render_gpus(&snapshot.gpus));
 
         let history = self.cpu_history.tail(HISTORY_LEN).collect();
         self.panel("cpu", theme.cpu_box, Some(right.into())).child(
@@ -764,6 +749,60 @@ impl Monitor {
     /// each a `label  amount` line over its history graph, and disks on
     /// the right. The readings share the box height evenly, so the graphs
     /// grow with the box.
+    /// One line per GPU under the cores, like btop's: usage, VRAM,
+    /// temperature and power. Numbered only when there is more than one.
+    fn render_gpus<'a>(&'a self, gpus: &'a [GpuSample]) -> impl Iterator<Item = Div> + 'a {
+        let theme = &self.theme;
+        gpus.iter().enumerate().map(move |(index, gpu)| {
+            let label = if gpus.len() > 1 {
+                format!("GPU{index}")
+            } else {
+                "GPU".to_owned()
+            };
+            let vram = share(gpu.vram_used, gpu.vram_total);
+            let temperature = gpu.temperature_c.map(|celsius| {
+                let level = celsius / gpu.critical_c.unwrap_or(100.0);
+                div()
+                    .text_color(theme.temperature.at(level))
+                    .child(format!("{celsius:.0}°C"))
+            });
+            let power = gpu.power_w.map(|watts| {
+                let level = gpu.power_cap_w.map_or(0.0, |cap| watts / cap);
+                div()
+                    .text_color(theme.cached.at(level))
+                    .child(format!("{watts:.0}W"))
+            });
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .h(px(ROW_HEIGHT))
+                .child(div().text_color(theme.muted).child(label))
+                .child(div().flex_1().h_full().child(meter(
+                    gpu.usage,
+                    theme.cpu,
+                    theme.meter_empty,
+                )))
+                .child(
+                    div()
+                        .text_color(theme.cpu.at(gpu.usage))
+                        .child(format!("{:>3.0}%", gpu.usage * 100.0)),
+                )
+                .child(div().w(px(34.0)).h(px(12.0)).child(meter(
+                    vram,
+                    theme.used,
+                    theme.meter_empty,
+                )))
+                .child(format!(
+                    "{}/{}",
+                    short_bytes(gpu.vram_used),
+                    short_bytes(gpu.vram_total)
+                ))
+                .children(temperature)
+                .children(power)
+        })
+    }
+
     fn render_memory(&self, snapshot: &Snapshot) -> Div {
         let theme = &self.theme;
         let memory = snapshot.memory;
@@ -818,16 +857,10 @@ impl Monitor {
                     )
             });
 
-        // The column is narrow, so a disk shows its size and the meter
-        // shows how full it is.
-        let disks = snapshot.disks.iter().map(|disk| {
-            self.meter_row(
-                &disk.mount_point,
-                bytes(disk.total),
-                share(disk.used, disk.total),
-                theme.used,
-            )
-        });
+        let disks = snapshot
+            .disks
+            .iter()
+            .map(|disk| self.render_disk(disk, self.disk_io.get(&disk.mount_point)));
 
         self.panel(
             "mem",
@@ -867,25 +900,113 @@ impl Monitor {
         )
     }
 
+    /// A disk as btop shows it: its size, its I/O as mirrored graphs
+    /// with reads growing up and writes down, and how full it is. The
+    /// column is narrow, so the meter's percentage stands in for the
+    /// used amount.
+    fn render_disk(&self, disk: &DiskSample, io: Option<&DiskIo>) -> Div {
+        let theme = &self.theme;
+        // Each direction scales to its own peak. The floor keeps a disk
+        // that only sees the odd log write from looking busy.
+        const FLOOR: f32 = 1_048_576.0;
+        let (read, write) = io.map_or_else(Default::default, |io| {
+            (
+                scaled(&io.read, DISK_IO_WINDOW, FLOOR).0,
+                scaled(&io.write, DISK_IO_WINDOW, FLOOR).0,
+            )
+        });
+        let style = |grow| GraphStyle::small(grow).fitted(DISK_IO_WINDOW);
+        let rate = |label: &str, value: f64, gradient: Gradient| {
+            div()
+                .flex()
+                .justify_between()
+                .child(div().text_color(gradient.at(0.9)).child(label.to_owned()))
+                .child(format!("{}/s", short_bytes(value as u64)))
+        };
+        let fraction = share(disk.used, disk.total);
+        div()
+            .flex()
+            .flex_col()
+            .flex_shrink_0()
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(theme.muted)
+                            .child(disk.mount_point.clone()),
+                    )
+                    .child(div().flex_shrink_0().child(bytes(disk.total))),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .h(px(DISK_IO_HEIGHT))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .border_1()
+                            .border_color(theme.faint)
+                            .rounded_sm()
+                            .child(div().flex_1().child(graph(
+                                read,
+                                theme.download,
+                                style(Grow::Up),
+                            )))
+                            .child(div().flex_1().child(graph(
+                                write,
+                                theme.upload,
+                                style(Grow::Down),
+                            ))),
+                    )
+                    .child(
+                        div()
+                            .w(chars(8.0))
+                            .flex_shrink_0()
+                            .flex()
+                            .flex_col()
+                            .justify_center()
+                            .child(rate("R", disk.read_per_sec, theme.download))
+                            .child(rate("W", disk.write_per_sec, theme.upload)),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .h(px(ROW_HEIGHT - 4.0))
+                    .child(div().flex_1().h_full().child(meter(
+                        fraction,
+                        theme.used,
+                        theme.meter_empty,
+                    )))
+                    .child(
+                        div()
+                            .w(chars(8.0))
+                            .flex()
+                            .justify_end()
+                            .text_color(theme.used.at(fraction))
+                            .child(format!("{:.0}%", fraction * 100.0)),
+                    ),
+            )
+    }
+
     fn render_network(&self, snapshot: &Snapshot) -> Div {
         let theme = &self.theme;
         let network = snapshot.network;
 
-        // Each direction scales to its own peak over the samples shown.
         // The floor keeps an idle link from blowing a few bytes of
         // background chatter up to full height.
-        let scaled = |history: &History| -> (Vec<f32>, f32) {
-            let peak = history.tail(NETWORK_WINDOW).fold(10_240.0_f32, f32::max);
-            (
-                history
-                    .tail(NETWORK_WINDOW)
-                    .map(|value| value / peak)
-                    .collect(),
-                peak,
-            )
-        };
-        let (rx, rx_peak) = scaled(&self.rx_history);
-        let (tx, tx_peak) = scaled(&self.tx_history);
+        let (rx, rx_peak) = scaled(&self.rx_history, NETWORK_WINDOW, 10_240.0);
+        let (tx, tx_peak) = scaled(&self.tx_history, NETWORK_WINDOW, 10_240.0);
 
         let legend =
             |arrow: &str, label: &str, rate: f64, peak: f32, total: u64, gradient: Gradient| {
@@ -1349,6 +1470,38 @@ fn share(part: u64, whole: u64) -> f32 {
         0.0
     } else {
         part as f32 / whole as f32
+    }
+}
+
+/// The last `window` samples divided by their peak, which never drops
+/// below `floor`, and that peak.
+fn scaled(history: &History, window: usize, floor: f32) -> (Vec<f32>, f32) {
+    let peak = history.tail(window).fold(floor, f32::max);
+    (
+        history.tail(window).map(|value| value / peak).collect(),
+        peak,
+    )
+}
+
+#[derive(Debug)]
+struct DiskIo {
+    read: History,
+    write: History,
+}
+
+/// Sizes in btop's terse style, e.g. `1.5G` or `16G`, for tight rows.
+fn short_bytes(count: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "K", "M", "G", "T"];
+    let mut value = count as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if value < 10.0 && unit > 0 {
+        format!("{value:.1}{}", UNITS[unit])
+    } else {
+        format!("{value:.0}{}", UNITS[unit])
     }
 }
 

@@ -3,6 +3,7 @@
 //! touching sysinfo again.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::time::Instant;
 
 use sysinfo::{
@@ -10,12 +11,15 @@ use sysinfo::{
     ProcessesToUpdate, RefreshKind, System, ThreadKind, UpdateKind, Users,
 };
 
+use crate::gpu::{AmdGpu, GpuSample};
+
 #[derive(Debug, Clone)]
 pub struct Snapshot {
     pub cpu: CpuSample,
     pub memory: MemorySample,
     pub network: NetworkSample,
     pub disks: Vec<DiskSample>,
+    pub gpus: Vec<GpuSample>,
     pub processes: Vec<ProcessSample>,
     pub load_average: [f64; 3],
     pub uptime_secs: u64,
@@ -63,6 +67,9 @@ pub struct DiskSample {
     pub mount_point: String,
     pub total: u64,
     pub used: u64,
+    /// Bytes per second since the previous sample.
+    pub read_per_sec: f64,
+    pub write_per_sec: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -87,7 +94,10 @@ pub struct Sampler {
     components: Components,
     users: Users,
     user_names: HashMap<sysinfo::Uid, String>,
-    last_network_refresh: Instant,
+    gpus: Vec<AmdGpu>,
+    /// When network and disk counters were last read, to turn the
+    /// bytes since then into rates.
+    last_refresh: Instant,
 }
 
 impl Sampler {
@@ -108,7 +118,8 @@ impl Sampler {
             components: Components::new_with_refreshed_list(),
             users: Users::new_with_refreshed_list(),
             user_names: HashMap::new(),
-            last_network_refresh: Instant::now(),
+            gpus: AmdGpu::find_all(Path::new("/sys/class/drm")),
+            last_refresh: Instant::now(),
         };
         sampler.sample();
         sampler
@@ -135,17 +146,18 @@ impl Sampler {
 
         let now = Instant::now();
         let elapsed = now
-            .duration_since(self.last_network_refresh)
+            .duration_since(self.last_refresh)
             .as_secs_f64()
             .max(f64::EPSILON);
-        self.last_network_refresh = now;
+        self.last_refresh = now;
 
         let load = System::load_average();
         Snapshot {
             cpu: self.cpu(),
             memory: self.memory(),
             network: self.network(elapsed),
-            disks: self.disks(),
+            disks: self.disks(elapsed),
+            gpus: self.gpus.iter().filter_map(AmdGpu::sample).collect(),
             processes: self.processes(),
             load_average: [load.one, load.five, load.fifteen],
             uptime_secs: System::uptime(),
@@ -213,7 +225,7 @@ impl Sampler {
     /// One row per block device. On NixOS `/nix/store` is a read-only
     /// bind mount of the root filesystem, and btrfs subvolumes show up
     /// once per mount point, so keep only the first mount of each device.
-    fn disks(&self) -> Vec<DiskSample> {
+    fn disks(&self, elapsed_secs: f64) -> Vec<DiskSample> {
         let mut seen = std::collections::HashSet::new();
         self.disks
             .iter()
@@ -223,6 +235,8 @@ impl Sampler {
                 mount_point: disk.mount_point().to_string_lossy().into_owned(),
                 total: disk.total_space(),
                 used: disk.total_space().saturating_sub(disk.available_space()),
+                read_per_sec: disk.usage().read_bytes as f64 / elapsed_secs,
+                write_per_sec: disk.usage().written_bytes as f64 / elapsed_secs,
             })
             .collect()
     }

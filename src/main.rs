@@ -1,5 +1,6 @@
 //! lki-top: a graphical system monitor in the spirit of btop.
 
+mod gpu;
 mod graph;
 mod history;
 mod monitor;

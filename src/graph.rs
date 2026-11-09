@@ -56,6 +56,17 @@ impl GraphStyle {
         }
     }
 
+    /// For graphs too short for grid lines, like the disk I/O ones.
+    pub fn small(grow: Grow) -> Self {
+        Self {
+            grow,
+            spacing: Spacing::Pixels(2.0),
+            line_width: 1.0,
+            grid: None,
+            backdrop: None,
+        }
+    }
+
     pub fn sparkline(backdrop: Hsla) -> Self {
         Self {
             grow: Grow::Up,
