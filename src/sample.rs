@@ -40,6 +40,9 @@ pub struct MemorySample {
     pub used: u64,
     pub available: u64,
     pub free: u64,
+    /// The kernel's page cache. `None` where `/proc/meminfo` can't be
+    /// read; sysinfo doesn't report it.
+    pub cached: Option<u64>,
     pub swap_total: u64,
     pub swap_used: u64,
 }
@@ -187,6 +190,7 @@ impl Sampler {
             used: self.system.used_memory(),
             available: self.system.available_memory(),
             free: self.system.free_memory(),
+            cached: page_cache(),
             swap_total: self.system.total_swap(),
             swap_used: self.system.used_swap(),
         }
@@ -277,4 +281,32 @@ fn user_name(
         .unwrap_or_else(|| uid.to_string());
     cache.insert(uid.clone(), name.clone());
     name
+}
+
+/// The `Cached:` line of `/proc/meminfo`, in bytes.
+fn page_cache() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    parse_meminfo_kib(&meminfo, "Cached:").map(|kib| kib * 1024)
+}
+
+fn parse_meminfo_kib(meminfo: &str, label: &str) -> Option<u64> {
+    meminfo
+        .lines()
+        .find_map(|line| line.strip_prefix(label))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|value| value.parse().ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn page_cache_skips_swap_cached() {
+        let meminfo = "MemFree:         7340032 kB\n\
+                       SwapCached:          512 kB\n\
+                       Cached:         26214400 kB\n";
+        assert_eq!(parse_meminfo_kib(meminfo, "Cached:"), Some(26_214_400));
+        assert_eq!(parse_meminfo_kib(meminfo, "Shmem:"), None);
+    }
 }

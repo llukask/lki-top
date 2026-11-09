@@ -405,7 +405,7 @@ mod tests {
 
     #[test]
     fn level_stops_reproduce_gradient_at_absolute_levels() {
-        let gradient = Gradient::new(0x00_00_00, 0x00_80_00, 0x00_ff_00);
+        let gradient = Gradient::from_hex(0x00_00_00, 0x00_80_00, 0x00_ff_00);
         let piece = gradient.pieces()[1];
         // A stroke whose vertices span 0.6..=0.9 of a 200 px graph.
         for level in [0.6, 0.75, 0.9] {
@@ -420,7 +420,7 @@ mod tests {
 
     #[test]
     fn flat_shapes_have_no_stops() {
-        let piece = Gradient::new(0, 0, 0).pieces()[0];
+        let piece = Gradient::from_hex(0, 0, 0).pieces()[0];
         assert_eq!(level_stops(piece, 0.3, 0.3, 200.0, 0.0), None);
     }
 }

@@ -17,8 +17,8 @@ use gpui::{
 use crate::graph::{GraphStyle, Grow, graph, meter};
 use crate::history::History;
 use crate::procs::{Fold, Layout, ProcessTable, SortColumn, SortOrder};
-use crate::sample::{Sampler, Snapshot};
-use crate::theme::{Gradient, Theme};
+use crate::sample::{MemorySample, Sampler, Snapshot};
+use crate::theme::{self, Gradient, Theme};
 
 /// Sampling intervals that `+` and `-` step through. The shortest stays
 /// above sysinfo's 200 ms minimum between CPU readings.
@@ -66,6 +66,8 @@ actions!(
         ShorterInterval,
         ToggleTree,
         ToggleFold,
+        NextTheme,
+        PreviousTheme,
         Quit,
     ]
 );
@@ -152,6 +154,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-k", Kill, browse),
         KeyBinding::new("e", ToggleTree, browse),
         KeyBinding::new("space", ToggleFold, browse),
+        KeyBinding::new("c", NextTheme, browse),
+        KeyBinding::new("shift-c", PreviousTheme, browse),
         // `+` arrives as `shift-=` or as `+` depending on the layout and
         // the platform's keymap handling; `=` saves reaching for shift.
         KeyBinding::new("+", LongerInterval, browse),
@@ -176,6 +180,8 @@ pub struct Monitor {
     core_histories: Vec<History>,
     rx_history: History,
     tx_history: History,
+    /// Indexed like [`MemoryStat::ALL`].
+    memory_histories: [History; MemoryStat::ALL.len()],
     table: ProcessTable,
     mode: Mode,
     /// Index into [`INTERVALS_MS`].
@@ -186,6 +192,9 @@ pub struct Monitor {
     /// Result of the last signal sent, shown in the process box footer.
     status: Option<SharedString>,
     theme: Theme,
+    /// Every theme `c` steps through, built-in ones first.
+    themes: Vec<Theme>,
+    mono: SharedString,
     focus_handle: FocusHandle,
     scroll_handle: UniformListScrollHandle,
 }
@@ -242,18 +251,26 @@ impl Monitor {
         })
         .detach();
 
+        let themes = theme::load_all();
+        let theme = theme::saved_choice()
+            .and_then(|name| themes.iter().find(|theme| theme.name == name))
+            .unwrap_or(&themes[0])
+            .clone();
         Self {
             snapshot: None,
             cpu_history: History::new(HISTORY_LEN),
             core_histories: Vec::new(),
             rx_history: History::new(HISTORY_LEN),
             tx_history: History::new(HISTORY_LEN),
+            memory_histories: std::array::from_fn(|_| History::new(HISTORY_LEN)),
             table: ProcessTable::new(SortOrder::by(SortColumn::Cpu)),
             mode: Mode::Browse,
             interval_step: DEFAULT_INTERVAL,
             interval_changes,
             status: None,
-            theme: Theme::new(cx),
+            theme,
+            themes,
+            mono: theme::pick_mono_font(cx),
             focus_handle: cx.focus_handle(),
             scroll_handle: UniformListScrollHandle::new(),
         }
@@ -271,6 +288,9 @@ impl Monitor {
         }
         self.rx_history.push(snapshot.network.rx_per_sec as f32);
         self.tx_history.push(snapshot.network.tx_per_sec as f32);
+        for (stat, history) in MemoryStat::ALL.iter().zip(&mut self.memory_histories) {
+            history.push(stat.share(snapshot.memory));
+        }
         self.table.replace(std::mem::take(&mut snapshot.processes));
         self.snapshot = Some(snapshot);
         cx.notify();
@@ -450,6 +470,30 @@ impl Monitor {
         cx.notify();
     }
 
+    fn step_theme(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let count = self.themes.len() as isize;
+        let current = self
+            .themes
+            .iter()
+            .position(|theme| theme.name == self.theme.name)
+            .unwrap_or(0) as isize;
+        self.theme = self.themes[(current + delta).rem_euclid(count) as usize].clone();
+        let name = &self.theme.name;
+        self.status = Some(match theme::save_choice(name) {
+            Ok(()) => format!("Theme: {name}").into(),
+            Err(err) => format!("Theme: {name} (couldn't save the choice: {err})").into(),
+        });
+        cx.notify();
+    }
+
+    fn next_theme(&mut self, _: &NextTheme, _: &mut Window, cx: &mut Context<Self>) {
+        self.step_theme(1, cx);
+    }
+
+    fn previous_theme(&mut self, _: &PreviousTheme, _: &mut Window, cx: &mut Context<Self>) {
+        self.step_theme(-1, cx);
+    }
+
     fn toggle_fold(&mut self, _: &ToggleFold, _: &mut Window, cx: &mut Context<Self>) {
         if self.table.toggle_fold() {
             cx.notify();
@@ -548,8 +592,15 @@ impl Monitor {
                 div()
                     .flex()
                     .justify_between()
-                    .child(div().text_color(theme.muted).child(label.to_owned()))
-                    .child(value),
+                    .gap_2()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(theme.muted)
+                            .child(label.to_owned()),
+                    )
+                    .child(div().flex_shrink_0().child(value)),
             )
             .child(
                 div()
@@ -709,21 +760,70 @@ impl Monitor {
         )
     }
 
+    /// The `mem` box, laid out like btop's: memory readings on the left,
+    /// each a `label  amount` line over its history graph, and disks on
+    /// the right. The readings share the box height evenly, so the graphs
+    /// grow with the box.
     fn render_memory(&self, snapshot: &Snapshot) -> Div {
         let theme = &self.theme;
         let memory = snapshot.memory;
-        let share = |part: u64, whole: u64| {
-            if whole == 0 {
-                0.0
-            } else {
-                part as f32 / whole as f32
-            }
-        };
 
+        let readings = MemoryStat::ALL
+            .iter()
+            .zip(&self.memory_histories)
+            .filter(|(stat, _)| stat.applies(memory))
+            .map(|(&stat, history)| {
+                let fraction = stat.share(memory);
+                let gradient = stat.gradient(theme);
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .child(div().text_color(theme.muted).child(stat.label()))
+                            .child(stat.amount(memory)),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_1()
+                            .min_h(px(ROW_HEIGHT - 4.0))
+                            .gap_2()
+                            .child(
+                                div()
+                                    .w(chars(4.0))
+                                    .flex_shrink_0()
+                                    .text_color(gradient.at(fraction))
+                                    .child(format!("{:.0}%", fraction * 100.0)),
+                            )
+                            // Stacked graphs with no backdrop run into each
+                            // other; the outline shows where each one starts.
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .h_full()
+                                    .border_1()
+                                    .border_color(theme.faint)
+                                    .rounded_sm()
+                                    .child(graph(
+                                        history.tail(HISTORY_LEN).collect(),
+                                        gradient,
+                                        GraphStyle::large(Grow::Up, theme.grid),
+                                    )),
+                            ),
+                    )
+            });
+
+        // The column is narrow, so a disk shows its size and the meter
+        // shows how full it is.
         let disks = snapshot.disks.iter().map(|disk| {
             self.meter_row(
                 &disk.mount_point,
-                format!("{} / {}", bytes(disk.used), bytes(disk.total)),
+                bytes(disk.total),
                 share(disk.used, disk.total),
                 theme.used,
             )
@@ -736,47 +836,34 @@ impl Monitor {
         )
         .child(
             div()
-                .id("memory-scroll")
                 .flex()
-                .flex_col()
-                .gap_1()
                 .flex_1()
-                .overflow_y_scroll()
-                .child(self.meter_row(
-                    "Used",
-                    bytes(memory.used),
-                    share(memory.used, memory.total),
-                    theme.used,
-                ))
-                .child(self.meter_row(
-                    "Available",
-                    bytes(memory.available),
-                    share(memory.available, memory.total),
-                    theme.available,
-                ))
-                .child(self.meter_row(
-                    "Free",
-                    bytes(memory.free),
-                    share(memory.free, memory.total),
-                    theme.free,
-                ))
-                .when(memory.swap_total > 0, |column| {
-                    column.child(self.meter_row(
-                        "Swap",
-                        format!("{} / {}", bytes(memory.swap_used), bytes(memory.swap_total)),
-                        share(memory.swap_used, memory.swap_total),
-                        theme.swap,
-                    ))
-                })
+                .min_h_0()
+                .gap_2()
                 .child(
                     div()
-                        .mt_1()
-                        .border_t_1()
-                        .border_color(theme.faint)
-                        .text_color(theme.title)
-                        .child("disks"),
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1()
+                        .children(readings),
                 )
-                .children(disks),
+                .child(
+                    div()
+                        .id("disks")
+                        .flex()
+                        .flex_col()
+                        .w(relative(0.45))
+                        .flex_shrink_0()
+                        .gap_1()
+                        .pl_2()
+                        .border_l_1()
+                        .border_color(theme.faint)
+                        .overflow_y_scroll()
+                        .child(div().text_color(theme.title).child("disks"))
+                        .children(disks),
+                ),
         )
     }
 
@@ -1011,7 +1098,7 @@ impl Monitor {
                         .h(px(ROW_HEIGHT))
                         .cursor_pointer()
                         .when(is_selected, |row| {
-                            row.bg(theme.selected_bg).text_color(theme.title)
+                            row.bg(theme.selected_bg).text_color(theme.selected_fg)
                         })
                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                             this.table.select_pid(pid);
@@ -1057,7 +1144,7 @@ impl Monitor {
                 Mode::Browse => div()
                     .text_color(theme.muted)
                     .child(self.status.clone().unwrap_or_else(|| {
-                        "f filter · ←/→ sort · r reverse · e tree · space fold · +/- rate · t term · K kill".into()
+                        "f filter · ←/→ sort · r reverse · e tree · space fold · +/- rate · c theme · t term · K kill".into()
                     }))
                     .into_any_element(),
             };
@@ -1141,6 +1228,8 @@ impl Render for Monitor {
             .on_action(cx.listener(Self::shorter_interval))
             .on_action(cx.listener(Self::toggle_tree))
             .on_action(cx.listener(Self::toggle_fold))
+            .on_action(cx.listener(Self::next_theme))
+            .on_action(cx.listener(Self::previous_theme))
             .on_action(cx.listener(Self::quit))
             .on_key_down(cx.listener(Self::filter_key_down))
             .size_full()
@@ -1151,7 +1240,7 @@ impl Render for Monitor {
             .bg(theme.background)
             .text_color(theme.text)
             .text_xs()
-            .font_family(theme.mono.clone());
+            .font_family(self.mono.clone());
 
         // The first snapshot arrives a moment after the window opens.
         let Some(snapshot) = &self.snapshot else {
@@ -1181,6 +1270,85 @@ impl Render for Monitor {
                     )
                     .child(self.render_processes(cx).flex_1()),
             )
+    }
+}
+
+/// A memory reading shown with a history graph in the `mem` box.
+#[derive(Debug, Clone, Copy)]
+enum MemoryStat {
+    Used,
+    Available,
+    Cached,
+    Free,
+    Swap,
+}
+
+impl MemoryStat {
+    const ALL: [Self; 5] = [
+        Self::Used,
+        Self::Available,
+        Self::Cached,
+        Self::Free,
+        Self::Swap,
+    ];
+
+    /// Cached needs `/proc/meminfo` and swap needs a swap device.
+    fn applies(self, memory: MemorySample) -> bool {
+        match self {
+            Self::Cached => memory.cached.is_some(),
+            Self::Swap => memory.swap_total > 0,
+            Self::Used | Self::Available | Self::Free => true,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Used => "Used",
+            Self::Available => "Available",
+            Self::Cached => "Cached",
+            Self::Free => "Free",
+            Self::Swap => "Swap",
+        }
+    }
+
+    /// Share of RAM, or of swap for [`MemoryStat::Swap`].
+    fn share(self, memory: MemorySample) -> f32 {
+        match self {
+            Self::Used => share(memory.used, memory.total),
+            Self::Available => share(memory.available, memory.total),
+            Self::Cached => share(memory.cached.unwrap_or(0), memory.total),
+            Self::Free => share(memory.free, memory.total),
+            Self::Swap => share(memory.swap_used, memory.swap_total),
+        }
+    }
+
+    fn amount(self, memory: MemorySample) -> String {
+        match self {
+            Self::Used => bytes(memory.used),
+            Self::Available => bytes(memory.available),
+            Self::Cached => bytes(memory.cached.unwrap_or(0)),
+            Self::Free => bytes(memory.free),
+            Self::Swap => format!("{} / {}", bytes(memory.swap_used), bytes(memory.swap_total)),
+        }
+    }
+
+    fn gradient(self, theme: &Theme) -> Gradient {
+        match self {
+            Self::Used => theme.used,
+            Self::Available => theme.available,
+            Self::Cached => theme.cached,
+            Self::Free => theme.free,
+            // btop themes have no swap colors; btop draws swap as used.
+            Self::Swap => theme.used,
+        }
+    }
+}
+
+fn share(part: u64, whole: u64) -> f32 {
+    if whole == 0 {
+        0.0
+    } else {
+        part as f32 / whole as f32
     }
 }
 
