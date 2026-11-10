@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use gpui::{App, Hsla, Rgba, SharedString};
+use gpui::{App, Global, Hsla, Rgba, SharedString};
 
 /// One linear stretch of a [`Gradient`]: levels `from..=to`, with the
 /// colors at both ends.
@@ -142,6 +142,9 @@ pub struct Theme {
     pub upload: Gradient,
     pub process: Gradient,
 }
+
+/// The theme in use, read by every box when it renders.
+impl Global for Theme {}
 
 impl Theme {
     #[cfg(test)]

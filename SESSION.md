@@ -8,10 +8,10 @@
   filter text, not the "Sent SIGTERM ..." result. The status also never
   expires.
 - Column widths in the process table assume ~7.4 px per monospace
-  character at `text_xs` (`CH` in `monitor.rs`). A font with a
+  character at `text_xs` (`CH` in `ui.rs`). A font with a
   different advance will make the fixed columns too wide or too narrow.
 - Missing compared to btop: per-process detail view,
-  per-interface network selection, disk I/O rates, battery.
+  per-interface network selection, battery.
 - Tree view folds only with `space`. Clicking the `▸`/`▾` marker selects
   the row but doesn't fold it.
 - The refresh interval resets to 1 s on every start. Nothing persists

@@ -1,12 +1,15 @@
 //! lki-top: a graphical system monitor in the spirit of btop.
 
+mod boxes;
 mod gpu;
 mod graph;
 mod history;
 mod monitor;
 mod procs;
+mod rates;
 mod sample;
 mod theme;
+mod ui;
 
 use gpui::{
     App, AppContext as _, Application, Bounds, Focusable as _, WindowBounds, WindowOptions, px,
