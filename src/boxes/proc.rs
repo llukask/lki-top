@@ -691,9 +691,7 @@ impl ProcessBox {
                 .into_any_element(),
             Mode::Browse => div()
                 .text_color(theme.muted)
-                .child(self.status.clone().unwrap_or_else(|| {
-                    "? keys · enter details · f filter · ←/→ sort · e tree · t term · K kill".into()
-                }))
+                .children(self.status.clone())
                 .into_any_element(),
         };
         div()

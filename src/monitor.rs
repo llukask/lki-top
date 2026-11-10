@@ -323,6 +323,13 @@ impl Render for Monitor {
                 )
                 .child(self.processes.clone()),
         )
+        .child(
+            div()
+                .flex_shrink_0()
+                .px_2()
+                .text_color(theme.muted)
+                .child("? keys"),
+        )
         .when_some(self.help_focus.clone(), |root, focus| {
             root.child(
                 div()
