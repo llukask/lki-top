@@ -88,6 +88,23 @@ pub struct ProcessSample {
     /// Average share of total CPU capacity since the process started,
     /// for the "cpu lazy" sort.
     pub lifetime_cpu: f32,
+    /// Seconds since the Unix epoch.
+    pub start_time: u64,
+    /// The kernel's run state, e.g. `Sleeping` or `Runnable`.
+    pub status: String,
+    /// Bytes per second since the previous process refresh. Zero for
+    /// other users' processes, whose `/proc/<pid>/io` isn't readable.
+    pub disk_read_per_sec: f64,
+    pub disk_write_per_sec: f64,
+}
+
+/// One refresh of the process list, with the machine totals that put
+/// each process's numbers in proportion.
+#[derive(Debug, Clone)]
+pub struct ProcessList {
+    pub processes: Vec<ProcessSample>,
+    pub total_memory: u64,
+    pub core_count: usize,
 }
 
 pub struct Sampler {
@@ -107,6 +124,8 @@ pub struct Sampler {
     /// When network and disk counters were last read, to turn the
     /// bytes since then into rates.
     last_refresh: Instant,
+    /// The same for per-process disk counters.
+    last_process_refresh: Instant,
 }
 
 impl Sampler {
@@ -130,6 +149,7 @@ impl Sampler {
             user_names: HashMap::new(),
             gpus: AmdGpu::find_all(Path::new("/sys/class/drm")),
             last_refresh: Instant::now(),
+            last_process_refresh: Instant::now(),
         };
         sampler.sample();
         sampler.sample_processes();
@@ -243,7 +263,7 @@ impl Sampler {
 
     /// Process CPU usage is the delta since the previous call, so the
     /// same minimum gap as [`Sampler::sample`] applies.
-    pub fn sample_processes(&mut self) -> Vec<ProcessSample> {
+    pub fn sample_processes(&mut self) -> ProcessList {
         self.process_system.refresh_processes_specifics(
             ProcessesToUpdate::All,
             true,
@@ -252,9 +272,17 @@ impl Sampler {
                 .with_memory()
                 .with_tasks()
                 .with_cmd(UpdateKind::OnlyIfNotSet)
-                .with_user(UpdateKind::OnlyIfNotSet),
+                .with_user(UpdateKind::OnlyIfNotSet)
+                .with_disk_usage(),
         );
-        let core_count = self.system.cpus().len().max(1) as f32;
+        let now = Instant::now();
+        let elapsed = now
+            .duration_since(self.last_process_refresh)
+            .as_secs_f64()
+            .max(f64::EPSILON);
+        self.last_process_refresh = now;
+        let cores = self.system.cpus().len().max(1);
+        let core_count = cores as f32;
         let mut processes = Vec::with_capacity(self.process_system.processes().len());
         for (pid, process) in self.process_system.processes() {
             // sysinfo lists every thread of a process as a process of its
@@ -288,9 +316,17 @@ impl Sampler {
                     / 1000.0
                     / process.run_time().max(1) as f32
                     / core_count,
+                start_time: process.start_time(),
+                status: process.status().to_string(),
+                disk_read_per_sec: process.disk_usage().read_bytes as f64 / elapsed,
+                disk_write_per_sec: process.disk_usage().written_bytes as f64 / elapsed,
             });
         }
-        processes
+        ProcessList {
+            processes,
+            total_memory: self.system.total_memory(),
+            core_count: cores,
+        }
     }
 }
 

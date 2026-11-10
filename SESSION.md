@@ -39,3 +39,9 @@
   average would damp it.
 - The `Cpu%` column shows current usage while "cpu lazy" sorts by
   lifetime usage, so the column doesn't look sorted. btop does the same.
+- Reading per-process disk I/O for the detail panel costs about 3 ms
+  per process refresh (18.8 vs 15.7 ms for ~540 processes), for every
+  process, although only the one in the panel needs it.
+- Once, in a headless test with a filter active and the detail panel
+  open, faint text from another row showed through the list header.
+  Not reproduced since.

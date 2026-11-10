@@ -160,6 +160,11 @@ impl ProcessTable {
             .position(|row| self.processes[row.index].pid == pid)
     }
 
+    /// Any process from the latest list, shown or filtered out.
+    pub fn find(&self, pid: u32) -> Option<&ProcessSample> {
+        self.processes.iter().find(|process| process.pid == pid)
+    }
+
     pub fn selected(&self) -> Option<&ProcessSample> {
         self.selected_index()
             .and_then(|index| self.row(index))
@@ -564,6 +569,10 @@ mod tests {
             memory: u64::from(pid) * 1024,
             cpu,
             lifetime_cpu: cpu,
+            start_time: 0,
+            status: "Sleeping".into(),
+            disk_read_per_sec: 0.0,
+            disk_write_per_sec: 0.0,
         }
     }
 

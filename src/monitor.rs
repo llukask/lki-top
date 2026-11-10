@@ -18,10 +18,10 @@ use crate::boxes::net::NetBox;
 use crate::boxes::proc::{
     Cancel, ClearFilter, CommitFilter, Confirm, Kill, PageDown, PageUp, ProcessBox, ReverseSort,
     SelectFirst, SelectLast, SelectNext, SelectPrevious, SortNext, SortPrevious, StartFilter,
-    Terminate, ToggleFold, ToggleTree,
+    Terminate, ToggleDetail, ToggleFold, ToggleTree,
 };
 use crate::rates::Rates;
-use crate::sample::{ProcessSample, Sampler, Snapshot};
+use crate::sample::{ProcessList, Sampler, Snapshot};
 use crate::theme::{self, Theme};
 
 actions!(
@@ -65,6 +65,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-k", Kill, browse),
         KeyBinding::new("e", ToggleTree, browse),
         KeyBinding::new("space", ToggleFold, browse),
+        KeyBinding::new("enter", ToggleDetail, browse),
         KeyBinding::new("c", NextTheme, browse),
         KeyBinding::new("shift-c", PreviousTheme, browse),
         // `+` arrives as `shift-=` or as `+` depending on the layout and
@@ -189,7 +190,7 @@ impl Monitor {
     fn ingest(
         &mut self,
         snapshot: Snapshot,
-        processes: Option<Vec<ProcessSample>>,
+        processes: Option<ProcessList>,
         cx: &mut Context<Self>,
     ) {
         self.cpu.ingest(&snapshot);

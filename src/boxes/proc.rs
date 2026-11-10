@@ -1,6 +1,7 @@
 //! The `proc` box: the process table with its selection, filter, sort
-//! and signal prompt. A view of its own, since it holds the keyboard
-//! focus and sets the key contexts that decide what each key does.
+//! and signal prompt, and a detail panel for one process. A view of its
+//! own, since it holds the keyboard focus and sets the key contexts that
+//! decide what each key does.
 
 use std::ops::Range;
 
@@ -9,13 +10,16 @@ use gpui::{
     SharedString, UniformListScrollHandle, Window, actions, div, prelude::*, px, uniform_list,
 };
 
-use crate::graph::meter;
+use crate::graph::{GraphStyle, Grow, graph, meter};
+use crate::history::History;
 use crate::procs::{Fold, Layout, ProcessTable, SortColumn, SortOrder};
-use crate::sample::ProcessSample;
+use crate::sample::{ProcessList, ProcessSample};
 use crate::theme::Theme;
-use crate::ui::{ROW_HEIGHT, bytes, chars, panel};
+use crate::ui::{ROW_HEIGHT, bytes, chars, duration, panel, scaled, share, short_bytes};
 
 const PAGE_ROWS: usize = 20;
+/// Samples of the detail panel's CPU graph, more than its width fits.
+const DETAIL_HISTORY_LEN: usize = 300;
 
 actions!(
     lki_top,
@@ -38,6 +42,7 @@ actions!(
         Cancel,
         ToggleTree,
         ToggleFold,
+        ToggleDetail,
     ]
 );
 
@@ -98,8 +103,38 @@ impl Signal {
     }
 }
 
+/// The process in the detail panel. It is followed by pid, so moving the
+/// selection doesn't change it, and its last reading stays on screen
+/// after it exits.
+#[derive(Debug)]
+struct Detail {
+    pid: u32,
+    /// Its CPU share at each process refresh since the panel opened.
+    cpu: History,
+    last: ProcessSample,
+    exited: bool,
+}
+
+impl Detail {
+    fn new(process: &ProcessSample) -> Self {
+        let mut cpu = History::new(DETAIL_HISTORY_LEN);
+        cpu.push(process.cpu);
+        Self {
+            pid: process.pid,
+            cpu,
+            last: process.clone(),
+            exited: false,
+        }
+    }
+}
+
 pub struct ProcessBox {
     table: ProcessTable,
+    detail: Option<Detail>,
+    /// From the latest process list, to put a process's numbers in
+    /// proportion.
+    total_memory: u64,
+    core_count: usize,
     mode: Mode,
     /// The last message for the user, such as a signal's result, shown
     /// in the footer.
@@ -112,6 +147,9 @@ impl ProcessBox {
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
             table: ProcessTable::new(SortOrder::by(SortColumn::CpuLazy)),
+            detail: None,
+            total_memory: 0,
+            core_count: 1,
             mode: Mode::Browse,
             status: None,
             focus_handle: cx.focus_handle(),
@@ -119,8 +157,32 @@ impl ProcessBox {
         }
     }
 
-    pub fn replace(&mut self, processes: Vec<ProcessSample>, cx: &mut Context<Self>) {
-        self.table.replace(processes);
+    pub fn replace(&mut self, list: ProcessList, cx: &mut Context<Self>) {
+        self.total_memory = list.total_memory;
+        self.core_count = list.core_count;
+        self.table.replace(list.processes);
+        if let Some(detail) = &mut self.detail {
+            match self.table.find(detail.pid) {
+                Some(process) => {
+                    detail.cpu.push(process.cpu);
+                    detail.last = process.clone();
+                }
+                None => detail.exited = true,
+            }
+        }
+        cx.notify();
+    }
+
+    /// Opens the panel for the selected process, or closes it if it
+    /// already shows that one.
+    fn toggle_detail_for_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(process) = self.table.selected() else {
+            return;
+        };
+        self.detail = match &self.detail {
+            Some(detail) if detail.pid == process.pid => None,
+            _ => Some(Detail::new(process)),
+        };
         cx.notify();
     }
 
@@ -222,9 +284,15 @@ impl ProcessBox {
         cx.notify();
     }
 
+    /// Escape backs out one step: out of typing a filter, then the
+    /// filter itself, then the detail panel.
     fn clear_filter(&mut self, _: &ClearFilter, _: &mut Window, cx: &mut Context<Self>) {
-        self.table.clear_filter();
-        self.mode = Mode::Browse;
+        if matches!(self.mode, Mode::Filter) || !self.table.filter().is_empty() {
+            self.table.clear_filter();
+            self.mode = Mode::Browse;
+        } else {
+            self.detail = None;
+        }
         cx.notify();
     }
 
@@ -269,6 +337,10 @@ impl ProcessBox {
                 .scroll_to_item(index, ScrollStrategy::Center);
         }
         cx.notify();
+    }
+
+    fn toggle_detail(&mut self, _: &ToggleDetail, _: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_detail_for_selected(cx);
     }
 
     fn toggle_fold(&mut self, _: &ToggleFold, _: &mut Window, cx: &mut Context<Self>) {
@@ -404,9 +476,12 @@ impl ProcessBox {
                         .when(is_selected, |row| {
                             row.bg(theme.selected_bg).text_color(theme.selected_fg)
                         })
-                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                             this.table.select_pid(pid);
                             window.focus(&this.focus_handle);
+                            if event.click_count() == 2 {
+                                this.toggle_detail_for_selected(cx);
+                            }
                             cx.notify();
                         })),
                     right().child(pid.to_string()),
@@ -422,6 +497,152 @@ impl ProcessBox {
                 .into_any_element()
             })
             .collect()
+    }
+
+    /// btop's detail panel: the process's CPU over time on the left, its
+    /// facts on the right, and the full command underneath.
+    fn render_detail(&self, detail: &Detail, theme: &Theme) -> impl IntoElement {
+        let process = &detail.last;
+        // One core fully busy is the least the graph scales to, so a
+        // process ticking over at a few percent of a core stays small.
+        let floor = 1.0 / self.core_count.max(1) as f32;
+        let (cpu, peak) = scaled(&detail.cpu, DETAIL_HISTORY_LEN, floor);
+        let parent = process.parent.map(|pid| match self.table.find(pid) {
+            Some(parent) => format!("{} ({pid})", parent.name),
+            None => pid.to_string(),
+        });
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs());
+        let memory = share(process.memory, self.total_memory);
+
+        let fact = |label: &'static str, value: String| {
+            div()
+                .flex()
+                .gap_2()
+                .child(
+                    div()
+                        .w(chars(8.0))
+                        .flex_shrink_0()
+                        .text_color(theme.muted)
+                        .child(label),
+                )
+                .child(div().min_w_0().truncate().child(value))
+        };
+        let (state, state_color) = if detail.exited {
+            ("exited".to_owned(), theme.highlight)
+        } else {
+            (process.status.clone(), theme.text)
+        };
+
+        // The facts set the panel's height and the graph fills it.
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .flex_shrink_0()
+            .gap_1()
+            .pb_1()
+            .mb_1()
+            .border_b_1()
+            .border_color(theme.faint)
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_color(theme.title)
+                            .child(format!("{} ({})", process.name, process.pid)),
+                    )
+                    .child(div().text_color(state_color).child(state))
+                    .child(div().flex_1())
+                    .child(div().text_color(theme.muted).child("esc closes")),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .gap_3()
+                    .child(
+                        div()
+                            .relative()
+                            .flex_1()
+                            .border_1()
+                            .border_color(theme.faint)
+                            .rounded_sm()
+                            .child(graph(
+                                cpu,
+                                theme.process,
+                                GraphStyle::large(Grow::Up, theme.grid),
+                            ))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .left_1()
+                                    .text_color(theme.process.at(process.cpu))
+                                    .child(format!(
+                                        "{:.1}% · top {:.1}%",
+                                        process.cpu * 100.0,
+                                        peak * 100.0
+                                    )),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w(chars(44.0))
+                            .flex_shrink_0()
+                            .flex()
+                            .flex_col()
+                            .child(fact(
+                                "Elapsed",
+                                elapsed(now.saturating_sub(process.start_time)),
+                            ))
+                            .child(fact("Parent", parent.unwrap_or_else(|| "none".into())))
+                            .child(fact("User", process.user.clone()))
+                            .child(fact("Threads", process.threads.to_string()))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .w(chars(8.0))
+                                            .flex_shrink_0()
+                                            .text_color(theme.muted)
+                                            .child("Memory"),
+                                    )
+                                    .child(div().w(px(60.0)).h(px(10.0)).child(meter(
+                                        memory,
+                                        theme.used,
+                                        theme.meter_empty,
+                                    )))
+                                    .child(format!(
+                                        "{} · {:.1}%",
+                                        bytes(process.memory),
+                                        memory * 100.0
+                                    )),
+                            )
+                            .child(fact(
+                                "Disk",
+                                format!(
+                                    "R {}/s · W {}/s",
+                                    short_bytes(process.disk_read_per_sec as u64),
+                                    short_bytes(process.disk_write_per_sec as u64)
+                                ),
+                            )),
+                    ),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .truncate()
+                    .text_color(theme.muted)
+                    .child(process.command.clone()),
+            )
     }
 
     fn render_footer(&self, theme: &Theme) -> impl IntoElement {
@@ -447,7 +668,7 @@ impl ProcessBox {
                 Mode::Browse => div()
                     .text_color(theme.muted)
                     .child(self.status.clone().unwrap_or_else(|| {
-                        "f filter · ←/→ sort · r reverse · e tree · space fold · +/- rate · [/] graph rate · c theme · t term · K kill".into()
+                        "enter details · f filter · ←/→ sort · r reverse · e tree · space fold · +/- rate · [/] graph rate · c theme · t term · K kill".into()
                     }))
                     .into_any_element(),
             };
@@ -491,6 +712,15 @@ fn columns<Row: ParentElement + Styled>(
         .child(user.w(chars(9.0)).flex_shrink_0().truncate())
         .child(memory.w(chars(9.0)).flex_shrink_0())
         .child(cpu.w(chars(12.0)).flex_shrink_0())
+}
+
+/// Seconds count while a process is young; after an hour they're noise.
+fn elapsed(secs: u64) -> String {
+    if secs < 3_600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        duration(secs)
+    }
 }
 
 fn direction(sort: SortOrder) -> &'static str {
@@ -538,7 +768,13 @@ impl Render for ProcessBox {
         .on_action(cx.listener(Self::cancel))
         .on_action(cx.listener(Self::toggle_tree))
         .on_action(cx.listener(Self::toggle_fold))
+        .on_action(cx.listener(Self::toggle_detail))
         .on_key_down(cx.listener(Self::filter_key_down))
+        .children(
+            self.detail
+                .as_ref()
+                .map(|detail| self.render_detail(detail, &theme)),
+        )
         .child(self.render_header(&theme, cx))
         .child(
             uniform_list(
