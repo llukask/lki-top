@@ -7,8 +7,7 @@ use std::ops::Range;
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, KeyDownEvent,
-    ScrollStrategy, SharedString, UniformListScrollHandle, Window, actions, div, prelude::*, px,
-    uniform_list,
+    ScrollStrategy, UniformListScrollHandle, Window, actions, div, prelude::*, px, uniform_list,
 };
 
 use crate::graph::{GraphStyle, Grow, graph, meter};
@@ -16,7 +15,7 @@ use crate::history::History;
 use crate::procs::{Fold, Layout, ProcessTable, SortColumn, SortOrder};
 use crate::sample::{ProcessList, ProcessSample};
 use crate::theme::Theme;
-use crate::ui::{ROW_HEIGHT, bytes, chars, duration, panel, scaled, share, short_bytes};
+use crate::ui::{Notice, ROW_HEIGHT, bytes, chars, duration, panel, scaled, share, short_bytes};
 
 const PAGE_ROWS: usize = 20;
 /// Samples of the detail panel's CPU graph, more than its width fits.
@@ -153,9 +152,8 @@ pub struct ProcessBox {
     total_memory: u64,
     core_count: usize,
     mode: Mode,
-    /// The last message for the user, such as a signal's result, shown
-    /// in the footer.
-    status: Option<SharedString>,
+    /// A signal's result, shown in the footer for a few seconds.
+    status: Option<Notice>,
     focus_handle: FocusHandle,
     scroll_handle: UniformListScrollHandle,
 }
@@ -209,8 +207,8 @@ impl ProcessBox {
         self.table.layout()
     }
 
-    pub fn show_status(&mut self, status: SharedString, cx: &mut Context<Self>) {
-        self.status = Some(status);
+    fn show_status(&mut self, status: String, cx: &mut Context<Self>) {
+        self.status = Some(Notice::new(status, cx, |this| &mut this.status));
         cx.notify();
     }
 
@@ -346,7 +344,7 @@ impl ProcessBox {
             ),
             Err(err) => format!("Couldn't signal {} ({}): {err}", pending.name, pending.pid),
         };
-        self.show_status(outcome.into(), cx);
+        self.show_status(outcome, cx);
     }
 
     fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
@@ -686,13 +684,18 @@ impl ProcessBox {
                 .text_color(theme.title)
                 .child(format!("filter: {}█", self.table.filter()))
                 .into_any_element(),
-            Mode::Browse if !self.table.filter().is_empty() => div()
-                .child(format!("filter: {}  (esc clears)", self.table.filter()))
-                .into_any_element(),
-            Mode::Browse => div()
-                .text_color(theme.muted)
-                .children(self.status.clone())
-                .into_any_element(),
+            // A signal's result is brief, so it takes the filter's place
+            // while it lasts.
+            Mode::Browse => match &self.status {
+                Some(status) => div()
+                    .text_color(theme.title)
+                    .child(status.text.clone())
+                    .into_any_element(),
+                None if !self.table.filter().is_empty() => div()
+                    .child(format!("filter: {}  (esc clears)", self.table.filter()))
+                    .into_any_element(),
+                None => div().into_any_element(),
+            },
         };
         div()
             .flex()

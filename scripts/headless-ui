@@ -2,6 +2,11 @@
 # Drive lki-top in a headless sway, so UI checks never open windows,
 # take focus or type into the desktop session. Run inside `nix develop`.
 #
+# Only the window and the keyboard are isolated. The app still lists,
+# and can signal, every process on the machine. A check that sends a
+# signal must filter for a process it started under a name nothing else
+# can match, and confirm nothing else matches before it presses `t`.
+#
 #   scripts/headless-ui start [WIDTHxHEIGHT]   start the compositor
 #   scripts/headless-ui launch [BINARY]        start the app, wait for its window
 #   scripts/headless-ui keys KEY...            e.g. `keys c j shift-k Return minus`

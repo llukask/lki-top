@@ -4,9 +4,6 @@
   `libc::ENOATTR` on Linux, which breaks `xattr` 0.2.3, pulled in by
   gpui 0.2.2. A plain `cargo update` brings the breakage back.
 - sysinfo 0.40 is out; the code targets 0.39.
-- After a signal is sent with a filter active, the footer shows the
-  filter text, not the "Sent SIGTERM ..." result. The status also never
-  expires.
 - Column widths in the process table assume ~7.4 px per monospace
   character at `text_xs` (`CH` in `ui.rs`). A font with a
   different advance will make the fixed columns too wide or too narrow.

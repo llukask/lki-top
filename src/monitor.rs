@@ -21,6 +21,7 @@ use crate::rates::Rates;
 use crate::sample::{ProcessList, Sampler, Snapshot};
 use crate::settings::Settings;
 use crate::theme::{self, Theme};
+use crate::ui::Notice;
 
 actions!(
     lki_top,
@@ -52,6 +53,9 @@ pub struct Monitor {
     /// use is the [`Theme`] global.
     themes: Vec<Theme>,
     mono: SharedString,
+    /// A message about the whole window, such as the theme just picked,
+    /// shown in the bottom line for a few seconds.
+    notice: Option<Notice>,
     /// Holds the focus while the help overlay is open, so its `Help` key
     /// context replaces the process box's and no key reaches the table.
     help_focus: Option<FocusHandle>,
@@ -142,6 +146,7 @@ impl Monitor {
             rate_changes,
             themes,
             mono: theme::pick_mono_font(cx),
+            notice: None,
             help_focus: None,
             _save_on_view_change: save_on_view_change,
         }
@@ -158,10 +163,13 @@ impl Monitor {
             layout: processes.layout(),
         };
         if let Err(err) = settings.save() {
-            let status = format!("Couldn't save settings: {err}");
-            self.processes
-                .update(cx, |processes, cx| processes.show_status(status.into(), cx));
+            self.show_notice(format!("Couldn't save settings: {err}"), cx);
         }
+    }
+
+    fn show_notice(&mut self, text: String, cx: &mut Context<Self>) {
+        self.notice = Some(Notice::new(text, cx, |this| &mut this.notice));
+        cx.notify();
     }
 
     /// The process list, when this sample includes one, goes to the
@@ -222,11 +230,10 @@ impl Monitor {
             .position(|theme| &theme.name == current_name)
             .unwrap_or(0) as isize;
         let next = self.themes[(current + delta).rem_euclid(count) as usize].clone();
-        let status = format!("Theme: {}", next.name);
+        let notice = format!("Theme: {}", next.name);
         cx.set_global(next);
-        self.processes
-            .update(cx, |processes, cx| processes.show_status(status.into(), cx));
-        // After the theme status, so a save error replaces it.
+        self.show_notice(notice, cx);
+        // After the theme notice, so a save error replaces it.
         self.save_settings(cx);
         cx.notify();
     }
@@ -325,10 +332,16 @@ impl Render for Monitor {
         )
         .child(
             div()
+                .flex()
                 .flex_shrink_0()
+                .gap_3()
                 .px_2()
-                .text_color(theme.muted)
-                .child("? keys"),
+                .child(div().text_color(theme.muted).child("? keys"))
+                .children(
+                    self.notice
+                        .as_ref()
+                        .map(|notice| div().text_color(theme.title).child(notice.text.clone())),
+                ),
         )
         .when_some(self.help_focus.clone(), |root, focus| {
             root.child(

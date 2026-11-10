@@ -1,7 +1,9 @@
 //! Pieces every box uses: the bordered box itself, the character grid
 //! that columns are measured in, and number formatting.
 
-use gpui::{Div, Hsla, SharedString, div, prelude::*, px};
+use std::time::Duration;
+
+use gpui::{Context, Div, Hsla, SharedString, Task, div, prelude::*, px};
 
 use crate::history::History;
 use crate::theme::Theme;
@@ -64,6 +66,41 @@ pub fn panel(
         .when_some(right, |panel, right| {
             panel.child(label(right).right(px(10.0)).text_color(theme.muted))
         })
+}
+
+/// How long a [`Notice`] stays up.
+const NOTICE_DURATION: Duration = Duration::from_secs(5);
+
+/// A message for the user that clears itself after a few seconds. A new
+/// notice replaces the old one and drops its timer with it, so an old
+/// timer never clears a newer message.
+pub struct Notice {
+    pub text: SharedString,
+    _expiry: Task<()>,
+}
+
+impl Notice {
+    /// `slot` is the view's field the notice lives in, for the timer to
+    /// clear.
+    pub fn new<V: 'static>(
+        text: impl Into<SharedString>,
+        cx: &mut Context<V>,
+        slot: fn(&mut V) -> &mut Option<Notice>,
+    ) -> Self {
+        let expiry = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(NOTICE_DURATION).await;
+            // Fails only when the view is gone, along with its notice.
+            this.update(cx, |view, cx| {
+                *slot(view) = None;
+                cx.notify();
+            })
+            .ok();
+        });
+        Self {
+            text: text.into(),
+            _expiry: expiry,
+        }
+    }
 }
 
 pub fn share(part: u64, whole: u64) -> f32 {
