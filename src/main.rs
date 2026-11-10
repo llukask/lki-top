@@ -4,6 +4,7 @@ mod boxes;
 mod gpu;
 mod graph;
 mod history;
+mod keys;
 mod monitor;
 mod procs;
 mod rates;
@@ -21,7 +22,7 @@ use monitor::Monitor;
 
 fn main() {
     Application::new().run(|cx: &mut App| {
-        monitor::bind_keys(cx);
+        keys::bind_keys(cx);
         cx.on_window_closed(|cx| cx.quit()).detach();
 
         let bounds = Bounds::centered(None, size(px(1280.0), px(820.0)), cx);

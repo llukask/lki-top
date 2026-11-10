@@ -8,18 +8,15 @@ use futures::channel::mpsc;
 use futures::future::{self, Either};
 
 use gpui::{
-    App, AppContext as _, Context, Entity, FocusHandle, Focusable, KeyBinding, SharedString,
+    App, AppContext as _, Context, Entity, FocusHandle, Focusable, MouseButton, SharedString,
     Subscription, Window, actions, div, prelude::*, relative,
 };
 
 use crate::boxes::cpu::CpuBox;
 use crate::boxes::mem::MemBox;
 use crate::boxes::net::NetBox;
-use crate::boxes::proc::{
-    Cancel, ClearFilter, CommitFilter, Confirm, Kill, PageDown, PageUp, ProcessBox, ReverseSort,
-    SelectFirst, SelectLast, SelectNext, SelectPrevious, SortNext, SortPrevious, StartFilter,
-    Terminate, ToggleDetail, ToggleFold, ToggleTree, ViewChanged,
-};
+use crate::boxes::proc::{ProcessBox, ViewChanged};
+use crate::keys;
 use crate::rates::Rates;
 use crate::sample::{ProcessList, Sampler, Snapshot};
 use crate::settings::Settings;
@@ -34,59 +31,11 @@ actions!(
         FewerGraphSamples,
         NextTheme,
         PreviousTheme,
+        ShowHelp,
+        CloseHelp,
         Quit,
     ]
 );
-
-/// The process box sets the key contexts, since it holds the focus.
-/// This view's own actions use the `Browse` context too, and reach it as
-/// they bubble up from the focused box.
-pub fn bind_keys(cx: &mut App) {
-    let browse = Some("Browse");
-    let filter = Some("Filter");
-    let confirm = Some("Confirm");
-    cx.bind_keys([
-        KeyBinding::new("ctrl-q", Quit, None),
-        KeyBinding::new("q", Quit, browse),
-        KeyBinding::new("down", SelectNext, browse),
-        KeyBinding::new("j", SelectNext, browse),
-        KeyBinding::new("up", SelectPrevious, browse),
-        KeyBinding::new("k", SelectPrevious, browse),
-        KeyBinding::new("pagedown", PageDown, browse),
-        KeyBinding::new("pageup", PageUp, browse),
-        KeyBinding::new("home", SelectFirst, browse),
-        KeyBinding::new("end", SelectLast, browse),
-        KeyBinding::new("right", SortNext, browse),
-        KeyBinding::new("left", SortPrevious, browse),
-        KeyBinding::new("r", ReverseSort, browse),
-        KeyBinding::new("f", StartFilter, browse),
-        KeyBinding::new("/", StartFilter, browse),
-        KeyBinding::new("escape", ClearFilter, browse),
-        KeyBinding::new("t", Terminate, browse),
-        KeyBinding::new("shift-k", Kill, browse),
-        KeyBinding::new("e", ToggleTree, browse),
-        KeyBinding::new("space", ToggleFold, browse),
-        KeyBinding::new("enter", ToggleDetail, browse),
-        KeyBinding::new("c", NextTheme, browse),
-        KeyBinding::new("shift-c", PreviousTheme, browse),
-        // `+` arrives as `shift-=` or as `+` depending on the layout and
-        // the platform's keymap handling; `=` saves reaching for shift.
-        KeyBinding::new("+", LongerInterval, browse),
-        KeyBinding::new("shift-=", LongerInterval, browse),
-        KeyBinding::new("=", LongerInterval, browse),
-        KeyBinding::new("-", ShorterInterval, browse),
-        KeyBinding::new("]", MoreGraphSamples, browse),
-        KeyBinding::new("[", FewerGraphSamples, browse),
-        KeyBinding::new("down", SelectNext, filter),
-        KeyBinding::new("up", SelectPrevious, filter),
-        KeyBinding::new("enter", CommitFilter, filter),
-        KeyBinding::new("escape", ClearFilter, filter),
-        KeyBinding::new("y", Confirm, confirm),
-        KeyBinding::new("enter", Confirm, confirm),
-        KeyBinding::new("n", Cancel, confirm),
-        KeyBinding::new("escape", Cancel, confirm),
-    ]);
-}
 
 pub struct Monitor {
     /// The latest reading, for the boxes that show its current values.
@@ -103,6 +52,9 @@ pub struct Monitor {
     /// use is the [`Theme`] global.
     themes: Vec<Theme>,
     mono: SharedString,
+    /// Holds the focus while the help overlay is open, so its `Help` key
+    /// context replaces the process box's and no key reaches the table.
+    help_focus: Option<FocusHandle>,
     _save_on_view_change: Subscription,
 }
 
@@ -190,6 +142,7 @@ impl Monitor {
             rate_changes,
             themes,
             mono: theme::pick_mono_font(cx),
+            help_focus: None,
             _save_on_view_change: save_on_view_change,
         }
     }
@@ -286,6 +239,23 @@ impl Monitor {
         self.step_theme(-1, cx);
     }
 
+    fn show_help(&mut self, _: &ShowHelp, window: &mut Window, cx: &mut Context<Self>) {
+        let focus = cx.focus_handle();
+        window.focus(&focus);
+        self.help_focus = Some(focus);
+        cx.notify();
+    }
+
+    fn hide_help(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.help_focus = None;
+        window.focus(&self.processes.focus_handle(cx));
+        cx.notify();
+    }
+
+    fn close_help(&mut self, _: &CloseHelp, window: &mut Window, cx: &mut Context<Self>) {
+        self.hide_help(window, cx);
+    }
+
     fn quit(&mut self, _: &Quit, _: &mut Window, cx: &mut Context<Self>) {
         cx.quit();
     }
@@ -307,7 +277,9 @@ impl Render for Monitor {
             .on_action(cx.listener(Self::fewer_graph_samples))
             .on_action(cx.listener(Self::next_theme))
             .on_action(cx.listener(Self::previous_theme))
+            .on_action(cx.listener(Self::show_help))
             .on_action(cx.listener(Self::quit))
+            .relative()
             .size_full()
             .flex()
             .flex_col()
@@ -351,5 +323,24 @@ impl Render for Monitor {
                 )
                 .child(self.processes.clone()),
         )
+        .when_some(self.help_focus.clone(), |root, focus| {
+            root.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(theme.background.opacity(0.8))
+                    .key_context(keys::HELP)
+                    .track_focus(&focus)
+                    .on_action(cx.listener(Self::close_help))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| this.hide_help(window, cx)),
+                    )
+                    .child(keys::help(&theme)),
+            )
+        })
     }
 }

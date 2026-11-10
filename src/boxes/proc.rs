@@ -672,31 +672,30 @@ impl ProcessBox {
 
     fn render_footer(&self, theme: &Theme) -> impl IntoElement {
         let shown = format!("{}/{}", self.table.len(), self.table.total());
-        let left: AnyElement =
-            match &self.mode {
-                Mode::Confirm(pending) => div()
-                    .text_color(theme.highlight)
-                    .child(format!(
-                        "Send {} to {} ({})?  y / n",
-                        pending.signal.name(),
-                        pending.name,
-                        pending.pid
-                    ))
-                    .into_any_element(),
-                Mode::Filter => div()
-                    .text_color(theme.title)
-                    .child(format!("filter: {}█", self.table.filter()))
-                    .into_any_element(),
-                Mode::Browse if !self.table.filter().is_empty() => div()
-                    .child(format!("filter: {}  (esc clears)", self.table.filter()))
-                    .into_any_element(),
-                Mode::Browse => div()
-                    .text_color(theme.muted)
-                    .child(self.status.clone().unwrap_or_else(|| {
-                        "enter details · f filter · ←/→ sort · r reverse · e tree · space fold · +/- rate · [/] graph rate · c theme · t term · K kill".into()
-                    }))
-                    .into_any_element(),
-            };
+        let left: AnyElement = match &self.mode {
+            Mode::Confirm(pending) => div()
+                .text_color(theme.highlight)
+                .child(format!(
+                    "Send {} to {} ({})?  y / n",
+                    pending.signal.name(),
+                    pending.name,
+                    pending.pid
+                ))
+                .into_any_element(),
+            Mode::Filter => div()
+                .text_color(theme.title)
+                .child(format!("filter: {}█", self.table.filter()))
+                .into_any_element(),
+            Mode::Browse if !self.table.filter().is_empty() => div()
+                .child(format!("filter: {}  (esc clears)", self.table.filter()))
+                .into_any_element(),
+            Mode::Browse => div()
+                .text_color(theme.muted)
+                .child(self.status.clone().unwrap_or_else(|| {
+                    "? keys · enter details · f filter · ←/→ sort · e tree · t term · K kill".into()
+                }))
+                .into_any_element(),
+        };
         div()
             .flex()
             .flex_shrink_0()
