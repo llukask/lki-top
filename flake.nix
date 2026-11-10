@@ -53,6 +53,13 @@
             clippy
             rust-analyzer
             pkg-config
+            # UI checks in a headless compositor (scripts/headless-ui).
+            sway
+            grim
+            wtype
+            imagemagick
+            jq
+            shellcheck
           ];
           buildInputs = gpuiLibs;
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath gpuiLibs;

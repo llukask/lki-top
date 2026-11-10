@@ -29,9 +29,6 @@
 - Themes use only part of a btop theme: `graph_text`, `proc_misc` and
   `inactive_fg` (beyond the meter fallback) are ignored, and the
   label color is a blend of `main_fg` and `main_bg`, not a theme key.
-- Each test launch of lki-top takes keyboard focus, so anything the
-  user is typing at that moment lands in the app. Stray `c` and `-`
-  presses changed the theme and the interval during testing.
 - GPU readings poll `gpu_busy_percent` every sample. On laptops with a
   runtime-suspended discrete AMD GPU, that read may wake the GPU and
   cost battery. Not checked; this machine is a desktop.

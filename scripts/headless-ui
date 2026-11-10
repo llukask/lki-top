@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# Drive lki-top in a headless sway, so UI checks never open windows,
+# take focus or type into the desktop session. Run inside `nix develop`.
+#
+#   scripts/headless-ui start [WIDTHxHEIGHT]   start the compositor
+#   scripts/headless-ui launch [BINARY]        start the app, wait for its window
+#   scripts/headless-ui keys KEY...            e.g. `keys c j shift-k Return minus`
+#   scripts/headless-ui shot NAME [GEOMETRY]   screenshot into tmp/NAME.png (grim -g syntax)
+#   scripts/headless-ui pid                    print the app's pid
+#   scripts/headless-ui stop                   stop the app and the compositor
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+state=tmp/headless
+mkdir -p "$state"
+
+die() {
+    echo "headless-ui: $*" >&2
+    exit 1
+}
+
+# Point Wayland clients at the headless compositor, never the session.
+use_compositor() {
+    [ -s "$state/env" ] || die "not started; run '$0 start' first"
+    read -r WAYLAND_DISPLAY SWAYSOCK <"$state/env"
+    export WAYLAND_DISPLAY SWAYSOCK
+    unset DISPLAY
+}
+
+start() {
+    local size=${1:-1700x1100}
+    if [ -s "$state/sway.pid" ] && kill -0 "$(cat "$state/sway.pid")" 2>/dev/null; then
+        die "already running (pid $(cat "$state/sway.pid"))"
+    fi
+    rm -f "$state/env"
+    # The exec line runs inside sway and reports which sockets it picked.
+    cat >"$state/sway.config" <<EOF
+output HEADLESS-1 resolution $size
+default_border none
+exec echo "\$WAYLAND_DISPLAY \$SWAYSOCK" > $PWD/$state/env
+EOF
+    env -u WAYLAND_DISPLAY -u DISPLAY -u SWAYSOCK \
+        WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 \
+        setsid sway --config "$state/sway.config" >"$state/sway.log" 2>&1 &
+    echo $! >"$state/sway.pid"
+    for _ in $(seq 1 50); do
+        [ -s "$state/env" ] && {
+            echo "started: $(cat "$state/env")"
+            return
+        }
+        sleep 0.1
+    done
+    die "sway didn't come up; see $state/sway.log"
+}
+
+launch() {
+    local binary=${1:-./target/release/lki-top}
+    use_compositor
+    # A config dir of its own, so a test that switches themes or saves
+    # settings never touches the user's.
+    mkdir -p "$state/config"
+    XDG_CONFIG_HOME=$PWD/$state/config "$binary" >"$state/app.log" 2>&1 &
+    local pid=$!
+    echo "$pid" >"$state/app.pid"
+    for _ in $(seq 1 100); do
+        if swaymsg -t get_tree | jq -e --argjson pid "$pid" '.. | objects | select(.pid? == $pid)' >/dev/null; then
+            echo "app running (pid $pid)"
+            return
+        fi
+        kill -0 "$pid" 2>/dev/null || die "app exited; see $state/app.log"
+        sleep 0.1
+    done
+    die "no window from pid $pid; see $state/app.log"
+}
+
+# Every key goes out in one wtype call, by keysym name. Each wtype call
+# registers a new virtual keyboard, and a key sent right after that
+# sometimes arrives before the app has the keyboard's layout, so
+# separate calls drop keys. Text arguments are no good either: wtype
+# joins them with spaces, and space folds the process tree.
+keys() {
+    use_compositor
+    local args=(-s 100 -d 120) key
+    for key in "$@"; do
+        case $key in
+        shift-*) args+=(-M shift -k "$(keysym "${key#shift-}")" -m shift) ;;
+        ctrl-*) args+=(-M ctrl -k "$(keysym "${key#ctrl-}")" -m ctrl) ;;
+        *) args+=(-k "$(keysym "$key")") ;;
+        esac
+    done
+    wtype "${args[@]}"
+}
+
+# Keysym names for the punctuation the key bindings use; anything else
+# (letters, `Return`, `Escape`, `Down`) already is one.
+keysym() {
+    case $1 in
+    -) echo minus ;;
+    =) echo equal ;;
+    +) echo plus ;;
+    [) echo bracketleft ;;
+    ]) echo bracketright ;;
+    /) echo slash ;;
+    \?) echo question ;;
+    ' ' | space) echo space ;;
+    *) echo "$1" ;;
+    esac
+}
+
+shot() {
+    local name=$1 geometry=${2:-}
+    use_compositor
+    if [ -n "$geometry" ]; then
+        grim -g "$geometry" "tmp/$name.png"
+    else
+        grim "tmp/$name.png"
+    fi
+    echo "tmp/$name.png"
+}
+
+stop() {
+    for file in app.pid sway.pid; do
+        if [ -s "$state/$file" ]; then
+            kill "$(cat "$state/$file")" 2>/dev/null || true
+            rm -f "$state/$file"
+        fi
+    done
+    rm -f "$state/env"
+}
+
+command=${1:-}
+shift || true
+case $command in
+start) start "$@" ;;
+launch) launch "$@" ;;
+keys) keys "$@" ;;
+shot) shot "$@" ;;
+pid) cat "$state/app.pid" ;;
+stop) stop ;;
+*) die "usage: $0 start|launch|keys|shot|pid|stop" ;;
+esac
