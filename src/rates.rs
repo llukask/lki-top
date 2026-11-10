@@ -29,6 +29,27 @@ impl Rates {
         wanted_graphs_per_refresh: 2,
     };
 
+    /// From the values [`Rates::process_interval_ms`] and
+    /// [`Rates::wanted_graphs_per_refresh`] gave. `None` for an interval
+    /// `+` and `-` can't reach.
+    pub fn from_saved(process_interval_ms: u64, wanted_graphs_per_refresh: u32) -> Option<Self> {
+        let process_step = INTERVALS_MS
+            .iter()
+            .position(|&ms| ms == process_interval_ms)?;
+        Some(Self {
+            process_step,
+            wanted_graphs_per_refresh: wanted_graphs_per_refresh.clamp(1, MAX_GRAPHS_PER_REFRESH),
+        })
+    }
+
+    pub fn process_interval_ms(self) -> u64 {
+        INTERVALS_MS[self.process_step]
+    }
+
+    pub fn wanted_graphs_per_refresh(self) -> u32 {
+        self.wanted_graphs_per_refresh
+    }
+
     pub fn process_interval(self) -> Duration {
         Duration::from_millis(INTERVALS_MS[self.process_step])
     }

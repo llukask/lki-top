@@ -9,7 +9,7 @@ use futures::future::{self, Either};
 
 use gpui::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable, KeyBinding, SharedString,
-    Window, actions, div, prelude::*, relative,
+    Subscription, Window, actions, div, prelude::*, relative,
 };
 
 use crate::boxes::cpu::CpuBox;
@@ -18,10 +18,11 @@ use crate::boxes::net::NetBox;
 use crate::boxes::proc::{
     Cancel, ClearFilter, CommitFilter, Confirm, Kill, PageDown, PageUp, ProcessBox, ReverseSort,
     SelectFirst, SelectLast, SelectNext, SelectPrevious, SortNext, SortPrevious, StartFilter,
-    Terminate, ToggleDetail, ToggleFold, ToggleTree,
+    Terminate, ToggleDetail, ToggleFold, ToggleTree, ViewChanged,
 };
 use crate::rates::Rates;
 use crate::sample::{ProcessList, Sampler, Snapshot};
+use crate::settings::Settings;
 use crate::theme::{self, Theme};
 
 actions!(
@@ -102,12 +103,14 @@ pub struct Monitor {
     /// use is the [`Theme`] global.
     themes: Vec<Theme>,
     mono: SharedString,
+    _save_on_view_change: Subscription,
 }
 
 impl Monitor {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        let settings = Settings::load();
         let (rate_changes, mut new_rates) = mpsc::unbounded();
-        let mut rates = Rates::DEFAULT;
+        let mut rates = settings.rates;
         // Counts graph samples; the process list refreshes on every
         // `graphs_per_refresh`-th one, starting with the first.
         let mut tick: u32 = 0;
@@ -167,21 +170,44 @@ impl Monitor {
         .detach();
 
         let themes = theme::load_all();
-        let chosen = theme::saved_choice()
+        let chosen = settings
+            .theme
             .and_then(|name| themes.iter().find(|theme| theme.name == name))
             .unwrap_or(&themes[0])
             .clone();
         cx.set_global(chosen);
+        let processes = cx.new(|cx| ProcessBox::new(settings.sort, settings.layout, cx));
+        let save_on_view_change = cx.subscribe(&processes, |this, _, _: &ViewChanged, cx| {
+            this.save_settings(cx)
+        });
         Self {
             snapshot: None,
             cpu: CpuBox::new(),
             mem: MemBox::new(),
             net: NetBox::new(),
-            processes: cx.new(ProcessBox::new),
-            rates: Rates::DEFAULT,
+            processes,
+            rates: settings.rates,
             rate_changes,
             themes,
             mono: theme::pick_mono_font(cx),
+            _save_on_view_change: save_on_view_change,
+        }
+    }
+
+    /// Writes every setting, wherever it changed. A failure shows in the
+    /// footer; the change itself still applies for this run.
+    fn save_settings(&mut self, cx: &mut Context<Self>) {
+        let processes = self.processes.read(cx);
+        let settings = Settings {
+            theme: Some(cx.global::<Theme>().name.to_string()),
+            rates: self.rates,
+            sort: processes.sort(),
+            layout: processes.layout(),
+        };
+        if let Err(err) = settings.save() {
+            let status = format!("Couldn't save settings: {err}");
+            self.processes
+                .update(cx, |processes, cx| processes.show_status(status.into(), cx));
         }
     }
 
@@ -209,6 +235,7 @@ impl Monitor {
         // Fails only once the sampling loop has stopped, and then there
         // is nothing left to retime.
         let _ = self.rate_changes.unbounded_send(rates);
+        self.save_settings(cx);
         cx.notify();
     }
 
@@ -242,14 +269,12 @@ impl Monitor {
             .position(|theme| &theme.name == current_name)
             .unwrap_or(0) as isize;
         let next = self.themes[(current + delta).rem_euclid(count) as usize].clone();
-        let name = next.name.clone();
+        let status = format!("Theme: {}", next.name);
         cx.set_global(next);
-        let status = match theme::save_choice(&name) {
-            Ok(()) => format!("Theme: {name}"),
-            Err(err) => format!("Theme: {name} (couldn't save the choice: {err})"),
-        };
         self.processes
             .update(cx, |processes, cx| processes.show_status(status.into(), cx));
+        // After the theme status, so a save error replaces it.
+        self.save_settings(cx);
         cx.notify();
     }
 

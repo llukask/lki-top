@@ -249,6 +249,10 @@ impl SortColumn {
         }
     }
 
+    pub fn from_label(label: &str) -> Option<SortColumn> {
+        Self::ALL.into_iter().find(|column| column.label() == label)
+    }
+
     /// The column whose header shows this sort. Both CPU sorts sit
     /// under the one `Cpu%` header.
     pub fn header(self) -> SortColumn {

@@ -335,30 +335,10 @@ fn theme_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-fn config_home() -> Option<PathBuf> {
+pub fn config_home() -> Option<PathBuf> {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".config")))
-}
-
-/// The file that remembers the chosen theme between runs.
-fn choice_file() -> Option<PathBuf> {
-    config_home().map(|config| config.join("lki-top/theme"))
-}
-
-/// The theme chosen last time, if it is still around.
-pub fn saved_choice() -> Option<String> {
-    let text = std::fs::read_to_string(choice_file()?).ok()?;
-    Some(text.trim().to_owned())
-}
-
-pub fn save_choice(name: &str) -> std::io::Result<()> {
-    let path = choice_file()
-        .ok_or_else(|| std::io::Error::other("neither XDG_CONFIG_HOME nor HOME is set"))?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    std::fs::write(path, format!("{name}\n"))
 }
 
 /// gpui's `.ZedMono` alias maps to Lilex, which most systems lack, and a

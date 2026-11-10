@@ -6,8 +6,9 @@
 use std::ops::Range;
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, FocusHandle, Focusable, KeyDownEvent, ScrollStrategy,
-    SharedString, UniformListScrollHandle, Window, actions, div, prelude::*, px, uniform_list,
+    AnyElement, App, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, KeyDownEvent,
+    ScrollStrategy, SharedString, UniformListScrollHandle, Window, actions, div, prelude::*, px,
+    uniform_list,
 };
 
 use crate::graph::{GraphStyle, Grow, graph, meter};
@@ -126,7 +127,23 @@ impl Detail {
             exited: false,
         }
     }
+
+    /// Takes the process's reading from the latest list, or marks it
+    /// exited and keeps the last one when it's no longer there.
+    fn follow(&mut self, latest: Option<&ProcessSample>) {
+        match latest {
+            Some(process) => {
+                self.cpu.push(process.cpu);
+                self.last = process.clone();
+            }
+            None => self.exited = true,
+        }
+    }
 }
+
+/// The sort or the layout changed, which the root view saves.
+#[derive(Debug, Clone, Copy)]
+pub struct ViewChanged;
 
 pub struct ProcessBox {
     table: ProcessTable,
@@ -144,9 +161,13 @@ pub struct ProcessBox {
 }
 
 impl ProcessBox {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(sort: SortOrder, layout: Layout, cx: &mut Context<Self>) -> Self {
+        let mut table = ProcessTable::new(sort);
+        if layout != table.layout() {
+            table.toggle_layout();
+        }
         Self {
-            table: ProcessTable::new(SortOrder::by(SortColumn::CpuLazy)),
+            table,
             detail: None,
             total_memory: 0,
             core_count: 1,
@@ -162,13 +183,7 @@ impl ProcessBox {
         self.core_count = list.core_count;
         self.table.replace(list.processes);
         if let Some(detail) = &mut self.detail {
-            match self.table.find(detail.pid) {
-                Some(process) => {
-                    detail.cpu.push(process.cpu);
-                    detail.last = process.clone();
-                }
-                None => detail.exited = true,
-            }
+            detail.follow(self.table.find(detail.pid));
         }
         cx.notify();
     }
@@ -184,6 +199,14 @@ impl ProcessBox {
             _ => Some(Detail::new(process)),
         };
         cx.notify();
+    }
+
+    pub fn sort(&self) -> SortOrder {
+        self.table.sort()
+    }
+
+    pub fn layout(&self) -> Layout {
+        self.table.layout()
     }
 
     pub fn show_status(&mut self, status: SharedString, cx: &mut Context<Self>) {
@@ -221,6 +244,7 @@ impl ProcessBox {
             self.scroll_handle
                 .scroll_to_item(index, ScrollStrategy::Center);
         }
+        cx.emit(ViewChanged);
         cx.notify();
     }
 
@@ -336,6 +360,7 @@ impl ProcessBox {
             self.scroll_handle
                 .scroll_to_item(index, ScrollStrategy::Center);
         }
+        cx.emit(ViewChanged);
         cx.notify();
     }
 
@@ -727,6 +752,8 @@ fn direction(sort: SortOrder) -> &'static str {
     if sort.descending { "desc" } else { "asc" }
 }
 
+impl EventEmitter<ViewChanged> for ProcessBox {}
+
 impl Focusable for ProcessBox {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -786,5 +813,38 @@ impl Render for ProcessBox {
             .flex_1(),
         )
         .child(self.render_footer(&theme))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn process(cpu: f32, memory: u64) -> ProcessSample {
+        ProcessSample {
+            pid: 42,
+            parent: Some(1),
+            name: "worker".into(),
+            command: "worker --busy".into(),
+            user: "lukas".into(),
+            threads: 4,
+            memory,
+            cpu,
+            lifetime_cpu: cpu,
+            start_time: 0,
+            status: "Runnable".into(),
+            disk_read_per_sec: 0.0,
+            disk_write_per_sec: 0.0,
+        }
+    }
+
+    #[test]
+    fn detail_keeps_the_last_reading_after_the_process_exits() {
+        let mut detail = Detail::new(&process(0.1, 1024));
+        detail.follow(Some(&process(0.3, 2048)));
+        detail.follow(None);
+        assert!(detail.exited);
+        assert_eq!(detail.last.memory, 2048);
+        assert_eq!(detail.cpu.tail(10).collect::<Vec<_>>(), [0.1, 0.3]);
     }
 }

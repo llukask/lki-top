@@ -8,6 +8,7 @@ mod monitor;
 mod procs;
 mod rates;
 mod sample;
+mod settings;
 mod theme;
 mod ui;
 
