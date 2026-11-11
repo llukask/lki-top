@@ -1,0 +1,5 @@
+# `proc-macro-error2` 2.0.1, which gpui 0.2.2 pulls in through
+# `stacksafe`, triggers a future-incompat report on every build. Only a
+# gpui update can change it. Lints in this crate's own code still show.
+[future-incompat-report]
+frequency = "never"
