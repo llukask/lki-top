@@ -32,6 +32,8 @@ actions!(
         FewerGraphSamples,
         NextTheme,
         PreviousTheme,
+        NextInterface,
+        PreviousInterface,
         ShowHelp,
         CloseHelp,
         Quit,
@@ -140,7 +142,7 @@ impl Monitor {
             snapshot: None,
             cpu: CpuBox::new(),
             mem: MemBox::new(),
-            net: NetBox::new(),
+            net: NetBox::new(settings.net),
             processes,
             rates: settings.rates,
             rate_changes,
@@ -161,6 +163,7 @@ impl Monitor {
             rates: self.rates,
             sort: processes.sort(),
             layout: processes.layout(),
+            net: self.net.chosen().clone(),
         };
         if let Err(err) = settings.save() {
             self.show_notice(format!("Couldn't save settings: {err}"), cx);
@@ -246,6 +249,25 @@ impl Monitor {
         self.step_theme(-1, cx);
     }
 
+    fn step_interface(&mut self, delta: isize, cx: &mut Context<Self>) {
+        self.net.step(delta);
+        self.save_settings(cx);
+        cx.notify();
+    }
+
+    fn next_interface(&mut self, _: &NextInterface, _: &mut Window, cx: &mut Context<Self>) {
+        self.step_interface(1, cx);
+    }
+
+    fn previous_interface(
+        &mut self,
+        _: &PreviousInterface,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.step_interface(-1, cx);
+    }
+
     fn show_help(&mut self, _: &ShowHelp, window: &mut Window, cx: &mut Context<Self>) {
         let focus = cx.focus_handle();
         window.focus(&focus);
@@ -284,6 +306,8 @@ impl Render for Monitor {
             .on_action(cx.listener(Self::fewer_graph_samples))
             .on_action(cx.listener(Self::next_theme))
             .on_action(cx.listener(Self::previous_theme))
+            .on_action(cx.listener(Self::next_interface))
+            .on_action(cx.listener(Self::previous_interface))
             .on_action(cx.listener(Self::show_help))
             .on_action(cx.listener(Self::quit))
             .relative()

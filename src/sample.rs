@@ -18,7 +18,8 @@ use crate::gpu::{AmdGpu, GpuSample};
 pub struct Snapshot {
     pub cpu: CpuSample,
     pub memory: MemorySample,
-    pub network: NetworkSample,
+    /// Sorted by name.
+    pub interfaces: Vec<InterfaceSample>,
     pub disks: Vec<DiskSample>,
     pub gpus: Vec<GpuSample>,
     pub load_average: [f64; 3],
@@ -51,15 +52,37 @@ pub struct MemorySample {
     pub swap_used: u64,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct NetworkSample {
-    /// Bytes per second since the previous sample, summed over all
-    /// interfaces except loopback.
+/// One network interface, loopback aside.
+#[derive(Debug, Clone)]
+pub struct InterfaceSample {
+    pub name: String,
+    /// Backed by network hardware, as opposed to a bridge, tunnel or
+    /// container veth, whose traffic also crosses a physical interface.
+    pub physical: bool,
+    pub traffic: Traffic,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Traffic {
+    /// Bytes per second since the previous sample.
     pub rx_per_sec: f64,
     pub tx_per_sec: f64,
-    /// Bytes since each interface came up.
+    /// Bytes since the interface came up.
     pub rx_total: u64,
     pub tx_total: u64,
+}
+
+impl std::ops::Add for Traffic {
+    type Output = Traffic;
+
+    fn add(self, other: Traffic) -> Traffic {
+        Traffic {
+            rx_per_sec: self.rx_per_sec + other.rx_per_sec,
+            tx_per_sec: self.tx_per_sec + other.tx_per_sec,
+            rx_total: self.rx_total + other.rx_total,
+            tx_total: self.tx_total + other.tx_total,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -176,7 +199,7 @@ impl Sampler {
         Snapshot {
             cpu: self.cpu(),
             memory: self.memory(),
-            network: self.network(elapsed),
+            interfaces: self.interfaces(elapsed),
             disks: self.disks(elapsed),
             gpus: self.gpus.iter().filter_map(AmdGpu::sample).collect(),
             load_average: [load.one, load.five, load.fifteen],
@@ -228,18 +251,29 @@ impl Sampler {
         }
     }
 
-    fn network(&self, elapsed_secs: f64) -> NetworkSample {
-        let mut sample = NetworkSample::default();
-        for (name, data) in &self.networks {
-            if name == "lo" {
-                continue;
-            }
-            sample.rx_per_sec += data.received() as f64 / elapsed_secs;
-            sample.tx_per_sec += data.transmitted() as f64 / elapsed_secs;
-            sample.rx_total += data.total_received();
-            sample.tx_total += data.total_transmitted();
-        }
-        sample
+    fn interfaces(&self, elapsed_secs: f64) -> Vec<InterfaceSample> {
+        let mut interfaces: Vec<InterfaceSample> = self
+            .networks
+            .iter()
+            .filter(|(name, _)| name.as_str() != "lo")
+            .map(|(name, data)| InterfaceSample {
+                name: name.clone(),
+                // Linux links an interface to its device only when there
+                // is hardware behind it.
+                physical: Path::new("/sys/class/net")
+                    .join(name)
+                    .join("device")
+                    .exists(),
+                traffic: Traffic {
+                    rx_per_sec: data.received() as f64 / elapsed_secs,
+                    tx_per_sec: data.transmitted() as f64 / elapsed_secs,
+                    rx_total: data.total_received(),
+                    tx_total: data.total_transmitted(),
+                },
+            })
+            .collect();
+        interfaces.sort_by(|a, b| a.name.cmp(&b.name));
+        interfaces
     }
 
     /// One row per block device. On NixOS `/nix/store` is a read-only

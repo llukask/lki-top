@@ -8,6 +8,7 @@
 //! sort = cpu lazy
 //! sort_descending = true
 //! tree = false
+//! net = physical
 //! ```
 //!
 //! The file is written whole on every change. Reading it is forgiving:
@@ -16,6 +17,7 @@
 
 use std::path::PathBuf;
 
+use crate::boxes::net::NetView;
 use crate::procs::{Layout, SortColumn, SortOrder};
 use crate::rates::Rates;
 
@@ -26,6 +28,7 @@ pub struct Settings {
     pub rates: Rates,
     pub sort: SortOrder,
     pub layout: Layout,
+    pub net: NetView,
 }
 
 impl Default for Settings {
@@ -35,6 +38,7 @@ impl Default for Settings {
             rates: Rates::DEFAULT,
             sort: SortOrder::by(SortColumn::CpuLazy),
             layout: Layout::Flat,
+            net: NetView::Physical,
         }
     }
 }
@@ -80,6 +84,12 @@ impl Settings {
                         settings.layout = if tree { Layout::Tree } else { Layout::Flat };
                     }
                 }
+                "net" => {
+                    settings.net = match value {
+                        "" | "physical" => NetView::Physical,
+                        name => NetView::Interface(name.to_owned()),
+                    };
+                }
                 _ => {}
             }
         }
@@ -103,12 +113,14 @@ impl Settings {
              graphs_per_refresh = {}\n\
              sort = {}\n\
              sort_descending = {}\n\
-             tree = {}\n",
+             tree = {}\n\
+             net = {}\n",
             self.rates.process_interval_ms(),
             self.rates.wanted_graphs_per_refresh(),
             self.sort.column.label(),
             self.sort.descending,
             self.layout == Layout::Tree,
+            self.net.label(),
         );
         text
     }
@@ -131,6 +143,7 @@ mod tests {
                 .step_graphs_per_refresh(2),
             sort: SortOrder::by(SortColumn::Memory).toggled(SortColumn::Memory),
             layout: Layout::Tree,
+            net: NetView::Interface("enp7s0".into()),
         };
         assert_eq!(Settings::parse(&settings.format()), settings);
     }

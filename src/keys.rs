@@ -10,8 +10,8 @@ use crate::boxes::proc::{
     ToggleDetail, ToggleFold, ToggleTree,
 };
 use crate::monitor::{
-    CloseHelp, FewerGraphSamples, LongerInterval, MoreGraphSamples, NextTheme, PreviousTheme, Quit,
-    ShorterInterval, ShowHelp,
+    CloseHelp, FewerGraphSamples, LongerInterval, MoreGraphSamples, NextInterface, NextTheme,
+    PreviousInterface, PreviousTheme, Quit, ShorterInterval, ShowHelp,
 };
 use crate::theme::Theme;
 use crate::ui::{ROW_HEIGHT, chars, panel};
@@ -184,6 +184,18 @@ const KEYMAP: &[Section] = &[
                 shown: "",
                 help: "",
                 bind: |key, context| KeyBinding::new(key, PreviousTheme, context),
+            },
+            Key {
+                strokes: &["n"],
+                shown: "n  b",
+                help: "next or previous network interface",
+                bind: |key, context| KeyBinding::new(key, NextInterface, context),
+            },
+            Key {
+                strokes: &["b"],
+                shown: "",
+                help: "",
+                bind: |key, context| KeyBinding::new(key, PreviousInterface, context),
             },
             Key {
                 strokes: &["?", "shift-/"],
