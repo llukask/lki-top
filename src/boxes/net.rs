@@ -7,9 +7,10 @@ use gpui::{Div, div, prelude::*, px};
 
 use crate::graph::{GraphStyle, Grow, graph};
 use crate::history::History;
+use crate::monitor::{NextInterface, PreviousInterface};
 use crate::sample::{Snapshot, Traffic};
 use crate::theme::{Gradient, Theme};
-use crate::ui::{bytes, chars, panel, scaled};
+use crate::ui::{action_button, bytes, chars, panel, scaled};
 
 const HISTORY_LEN: usize = 600;
 /// Samples the network graphs show, stretched to their width. The
@@ -185,7 +186,17 @@ impl NetBox {
             theme,
             "net",
             theme.net_box,
-            Some(format!("{} · b n", shown.label()).into()),
+            div()
+                .flex()
+                .gap_1()
+                .child(action_button(
+                    "net-previous",
+                    "‹b",
+                    PreviousInterface,
+                    theme,
+                ))
+                .child(div().text_color(theme.text).child(shown.label().to_owned()))
+                .child(action_button("net-next", "n›", NextInterface, theme)),
         )
         .child(
             div()

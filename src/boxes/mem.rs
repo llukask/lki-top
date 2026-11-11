@@ -127,7 +127,7 @@ impl MemBox {
             theme,
             "mem",
             theme.mem_box,
-            Some(format!("total {}", bytes(memory.total)).into()),
+            format!("total {}", bytes(memory.total)),
         )
         .child(
             div()

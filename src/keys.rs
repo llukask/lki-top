@@ -2,7 +2,7 @@
 //! from [`KEYMAP`], so a key can't be bound without being listed or
 //! listed without being bound.
 
-use gpui::{App, Div, KeyBinding, div, prelude::*, px};
+use gpui::{Action, App, Div, KeyBinding, div, prelude::*, px};
 
 use crate::boxes::proc::{
     Cancel, ClearFilter, CommitFilter, Confirm, Kill, PageDown, PageUp, ReverseSort, SelectFirst,
@@ -16,11 +16,12 @@ use crate::monitor::{
 use crate::theme::Theme;
 use crate::ui::{ROW_HEIGHT, chars, panel};
 
-/// Key contexts. The process box sets the first three by its mode, and
+/// Key contexts. The process box sets the first four by its mode, and
 /// the help overlay sets the last while it's open.
 const BROWSE: Option<&str> = Some("Browse");
 const FILTER: Option<&str> = Some("Filter");
 const CONFIRM: Option<&str> = Some("Confirm");
+const MENU: Option<&str> = Some("Menu");
 pub const HELP: &str = "Help";
 
 struct Section {
@@ -269,6 +270,18 @@ const KEYMAP: &[Section] = &[
             bind: |key, context| KeyBinding::new(key, Quit, context),
         }],
     },
+    // Not listed: a menu closes on escape or a click elsewhere, as menus
+    // do.
+    Section {
+        title: "",
+        context: MENU,
+        keys: &[Key {
+            strokes: &["escape"],
+            shown: "",
+            help: "",
+            bind: |key, context| KeyBinding::new(key, Cancel, context),
+        }],
+    },
     // Not listed: the overlay says how to close it.
     Section {
         title: "",
@@ -290,6 +303,22 @@ pub fn bind_keys(cx: &mut App) {
                 .map(move |stroke| (key.bind)(stroke, section.context))
         })
     }));
+}
+
+/// How the overlay names the keys that do `action` in the process list,
+/// for a menu to show beside the entry.
+pub fn shown_for(action: &dyn Action) -> Option<&'static str> {
+    KEYMAP
+        .iter()
+        .filter(|section| section.context == BROWSE)
+        .flat_map(|section| section.keys)
+        .find(|key| {
+            !key.shown.is_empty()
+                && (key.bind)(key.strokes[0], BROWSE)
+                    .action()
+                    .partial_eq(action)
+        })
+        .map(|key| key.shown)
 }
 
 /// The overlay's box, listing every section with a title.
@@ -327,16 +356,11 @@ pub fn help(theme: &Theme) -> Div {
                         }),
                 )
         });
-    panel(
-        theme,
-        "keys",
-        theme.proc_box,
-        Some("esc, ? or a click closes".into()),
-    )
-    .bg(theme.background)
-    .w(chars(60.0))
-    .gap_2()
-    .children(sections)
+    panel(theme, "keys", theme.proc_box, "esc, ? or a click closes")
+        .bg(theme.background)
+        .w(chars(60.0))
+        .gap_2()
+        .children(sections)
 }
 
 #[cfg(test)]
@@ -359,6 +383,14 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn menus_name_the_keys_that_do_the_same() {
+        assert_eq!(shown_for(&Kill), Some("K"));
+        assert_eq!(shown_for(&ToggleDetail), Some("enter"));
+        // Bound only while the signal prompt is up, not in the list.
+        assert_eq!(shown_for(&Confirm), None);
     }
 
     #[test]

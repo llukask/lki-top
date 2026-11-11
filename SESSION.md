@@ -7,12 +7,7 @@
 - Column widths in the process table assume ~7.4 px per monospace
   character at `text_xs` (`CH` in `ui.rs`). A font with a
   different advance will make the fixed columns too wide or too narrow.
-- Missing compared to btop: per-process detail view,
-  per-interface network selection, battery.
-- Tree view folds only with `space`. Clicking the `▸`/`▾` marker selects
-  the row but doesn't fold it.
-- The refresh interval resets to 1 s on every start. Nothing persists
-  settings yet.
+- Missing compared to btop: battery.
 - The process list re-renders every row on screen once per second, and
   `ProcessTable::update` lower-cases every name and command line for
   each filter keystroke. Fine at ~600 processes; untested at 10k.
@@ -39,6 +34,6 @@
 - Reading per-process disk I/O for the detail panel costs about 3 ms
   per process refresh (18.8 vs 15.7 ms for ~540 processes), for every
   process, although only the one in the panel needs it.
-- Once, in a headless test with a filter active and the detail panel
-  open, faint text from another row showed through the list header.
-  Not reproduced since.
+- The headless driver's keyboard (wtype) and pointer (wayvnc + vncdo)
+  are separate virtual devices. Mixing them works, but each click opens
+  a VNC connection, about 0.5 s per click.

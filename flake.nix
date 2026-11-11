@@ -57,6 +57,10 @@
             sway
             grim
             wtype
+            # A pointer for clicks: wayvnc holds one per connection, vncdo
+            # drives it.
+            wayvnc
+            python3Packages.vncdotool
             imagemagick
             jq
             shellcheck

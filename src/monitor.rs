@@ -21,7 +21,7 @@ use crate::rates::Rates;
 use crate::sample::{ProcessList, Sampler, Snapshot};
 use crate::settings::Settings;
 use crate::theme::{self, Theme};
-use crate::ui::Notice;
+use crate::ui::{Notice, action_button};
 
 actions!(
     lki_top,
@@ -360,7 +360,9 @@ impl Render for Monitor {
                 .flex_shrink_0()
                 .gap_3()
                 .px_2()
-                .child(div().text_color(theme.muted).child("? keys"))
+                .child(
+                    action_button("show-help", "? keys", ShowHelp, &theme).text_color(theme.muted),
+                )
                 .children(
                     self.notice
                         .as_ref()
@@ -381,7 +383,13 @@ impl Render for Monitor {
                     .on_action(cx.listener(Self::close_help))
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(|this, _, window, cx| this.hide_help(window, cx)),
+                        cx.listener(|this, _, window, cx| {
+                            // gpui gives a focus-tracking element the focus
+                            // on mouse down, after this handler, which would
+                            // take it back from the process box.
+                            window.prevent_default();
+                            this.hide_help(window, cx);
+                        }),
                     )
                     .child(keys::help(&theme)),
             )

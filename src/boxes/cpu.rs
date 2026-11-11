@@ -147,7 +147,7 @@ impl CpuBox {
             .children(gpu_lines(&snapshot.gpus, theme))
             .children(snapshot.psu.as_ref().map(|psu| psu_line(psu, theme)));
 
-        panel(theme, "cpu", theme.cpu_box, Some(right.into())).child(
+        panel(theme, "cpu", theme.cpu_box, right).child(
             div()
                 .flex()
                 .flex_1()

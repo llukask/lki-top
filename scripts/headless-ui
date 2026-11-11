@@ -10,6 +10,7 @@
 #   scripts/headless-ui start [WIDTHxHEIGHT]   start the compositor
 #   scripts/headless-ui launch [BINARY]        start the app, wait for its window
 #   scripts/headless-ui keys KEY...            e.g. `keys c j shift-k Return minus`
+#   scripts/headless-ui click X Y [BUTTON]     click at X,Y; BUTTON is left (default) or right
 #   scripts/headless-ui shot NAME [GEOMETRY]   screenshot into tmp/NAME.png (grim -g syntax)
 #   scripts/headless-ui pid                    print the app's pid
 #   scripts/headless-ui stop                   stop the app and the compositor
@@ -49,13 +50,24 @@ EOF
         setsid sway --config "$state/sway.config" >"$state/sway.log" 2>&1 &
     echo $! >"$state/sway.pid"
     for _ in $(seq 1 50); do
-        [ -s "$state/env" ] && {
+        [ -s "$state/env" ] && break
+        sleep 0.1
+    done
+    [ -s "$state/env" ] || die "sway didn't come up; see $state/sway.log"
+    use_compositor
+    # A unix socket, so no TCP port is open while the checks run.
+    rm -f "$state/vnc.sock"
+    wayvnc --unix-socket --socket="$PWD/$state/wayvnc-control.sock" "$PWD/$state/vnc.sock" \
+        >"$state/wayvnc.log" 2>&1 &
+    echo $! >"$state/wayvnc.pid"
+    for _ in $(seq 1 50); do
+        [ -S "$state/vnc.sock" ] && {
             echo "started: $(cat "$state/env")"
             return
         }
         sleep 0.1
     done
-    die "sway didn't come up; see $state/sway.log"
+    die "wayvnc didn't come up; see $state/wayvnc.log"
 }
 
 launch() {
@@ -112,6 +124,21 @@ keysym() {
     esac
 }
 
+# The headless seat has no pointer of its own. wayvnc adds a virtual one
+# for each VNC connection, and vncdo moves, waits and clicks over a
+# single connection: a button sent the moment the pointer appears can
+# reach the app before it has bound the pointer, and is lost.
+click() {
+    local x=$1 y=$2 button
+    case ${3:-left} in
+    left) button=1 ;;
+    right) button=3 ;;
+    *) die "unknown button ${3}" ;;
+    esac
+    [ -S "$state/vnc.sock" ] || die "no VNC socket; run '$0 start' first"
+    vncdo -s "$state/vnc.sock" move "$x" "$y" pause 0.3 click "$button" pause 0.1
+}
+
 shot() {
     local name=$1 geometry=${2:-}
     use_compositor
@@ -124,7 +151,7 @@ shot() {
 }
 
 stop() {
-    for file in app.pid sway.pid; do
+    for file in app.pid wayvnc.pid sway.pid; do
         if [ -s "$state/$file" ]; then
             kill "$(cat "$state/$file")" 2>/dev/null || true
             rm -f "$state/$file"
@@ -139,8 +166,9 @@ case $command in
 start) start "$@" ;;
 launch) launch "$@" ;;
 keys) keys "$@" ;;
+click) click "$@" ;;
 shot) shot "$@" ;;
 pid) cat "$state/app.pid" ;;
 stop) stop ;;
-*) die "usage: $0 start|launch|keys|shot|pid|stop" ;;
+*) die "usage: $0 start|launch|keys|click|shot|pid|stop" ;;
 esac

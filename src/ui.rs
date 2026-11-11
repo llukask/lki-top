@@ -3,7 +3,9 @@
 
 use std::time::Duration;
 
-use gpui::{Context, Div, Hsla, SharedString, Task, div, prelude::*, px};
+use gpui::{
+    Action, Context, Div, ElementId, Hsla, SharedString, Stateful, Task, div, prelude::*, px,
+};
 
 use crate::history::History;
 use crate::theme::Theme;
@@ -23,7 +25,7 @@ pub fn panel(
     theme: &Theme,
     title: impl Into<SharedString>,
     accent: Hsla,
-    right: Option<SharedString>,
+    right: impl IntoElement,
 ) -> Div {
     // gpui paints a div's border after its children, so a label inside
     // the bordered div can't cover the line. The border lives on a
@@ -40,7 +42,7 @@ pub fn panel(
         .border_1()
         .border_color(accent)
         .rounded_md();
-    let label = |text: SharedString| {
+    let label = || {
         div()
             .absolute()
             .top_0()
@@ -50,7 +52,6 @@ pub fn panel(
             .px_1()
             .bg(theme.background)
             .text_color(theme.title)
-            .child(text)
     };
     div()
         .relative()
@@ -62,10 +63,38 @@ pub fn panel(
         .px_2()
         .pb_1()
         .child(frame)
-        .child(label(title.into()).left(px(10.0)))
-        .when_some(right, |panel, right| {
-            panel.child(label(right).right(px(10.0)).text_color(theme.muted))
-        })
+        .child(label().left(px(10.0)).child(title.into()))
+        .child(label().right(px(10.0)).text_color(theme.muted).child(right))
+}
+
+/// Text that reacts to the pointer. The key hints on screen are buttons
+/// for what their keys do, so the mouse reaches everything the keyboard
+/// does.
+pub fn button(
+    id: impl Into<ElementId>,
+    text: impl Into<SharedString>,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let highlight = theme.highlight;
+    div()
+        .id(id)
+        .cursor_pointer()
+        .hover(move |style| style.text_color(highlight))
+        .child(text.into())
+}
+
+/// A [`button`] that dispatches `action` as its key would. The action
+/// starts at the focused element and bubbles up like a key's, so it
+/// reaches the process box's handlers as well as the root view's.
+pub fn action_button(
+    id: impl Into<ElementId>,
+    text: impl Into<SharedString>,
+    action: impl Action,
+    theme: &Theme,
+) -> Stateful<Div> {
+    button(id, text, theme).on_click(move |_, window, cx| {
+        window.dispatch_action(action.boxed_clone(), cx);
+    })
 }
 
 /// How long a [`Notice`] stays up.

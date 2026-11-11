@@ -6,16 +6,22 @@
 use std::ops::Range;
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, KeyDownEvent,
-    ScrollStrategy, UniformListScrollHandle, Window, actions, div, prelude::*, px, uniform_list,
+    Action, AnyElement, App, ClickEvent, Context, EventEmitter, FocusHandle, Focusable,
+    KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, ScrollStrategy,
+    UniformListScrollHandle, Window, actions, anchored, deferred, div, prelude::*, px,
+    uniform_list,
 };
 
 use crate::graph::{GraphStyle, Grow, graph, meter};
 use crate::history::History;
+use crate::keys;
 use crate::procs::{Fold, Layout, ProcessTable, SortColumn, SortOrder};
 use crate::sample::{ProcessList, ProcessSample};
 use crate::theme::Theme;
-use crate::ui::{Notice, ROW_HEIGHT, bytes, chars, duration, panel, scaled, share, short_bytes};
+use crate::ui::{
+    Notice, ROW_HEIGHT, action_button, button, bytes, chars, duration, panel, scaled, share,
+    short_bytes,
+};
 
 const PAGE_ROWS: usize = 20;
 /// Samples of the detail panel's CPU graph, more than its width fits.
@@ -53,6 +59,7 @@ enum Mode {
     Browse,
     Filter,
     Confirm(PendingSignal),
+    Menu(Menu),
 }
 
 impl Mode {
@@ -61,6 +68,7 @@ impl Mode {
             Mode::Browse => "Browse",
             Mode::Filter => "Filter",
             Mode::Confirm(_) => "Confirm",
+            Mode::Menu(_) => "Menu",
         }
     }
 }
@@ -73,6 +81,19 @@ struct PendingSignal {
     pid: u32,
     name: String,
     signal: Signal,
+}
+
+/// The right-click menu, open on one process. Its entries act on the
+/// selection, which is that process while the menu is up: the menu's
+/// key context binds nothing that moves it. The process can still exit,
+/// which moves the selection to its neighbour, so the menu keeps the pid
+/// to check against.
+#[derive(Debug, Clone)]
+struct Menu {
+    pid: u32,
+    name: String,
+    /// Where the click was, in window coordinates.
+    position: Point<Pixels>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -246,6 +267,38 @@ impl ProcessBox {
         cx.notify();
     }
 
+    fn open_menu(&mut self, pid: u32, position: Point<Pixels>, cx: &mut Context<Self>) {
+        self.table.select_pid(pid);
+        let Some(process) = self.table.selected() else {
+            return;
+        };
+        self.mode = Mode::Menu(Menu {
+            pid,
+            name: process.name.clone(),
+            position,
+        });
+        cx.notify();
+    }
+
+    /// Runs a menu entry the way its key would, unless the process the
+    /// menu was opened on has exited meanwhile.
+    fn choose(&mut self, action: &dyn Action, window: &mut Window, cx: &mut Context<Self>) {
+        let Mode::Menu(menu) = std::mem::replace(&mut self.mode, Mode::Browse) else {
+            return;
+        };
+        if self.table.selected().map(|process| process.pid) == Some(menu.pid) {
+            window.dispatch_action(action.boxed_clone(), cx);
+        } else {
+            self.show_status(format!("{} ({}) has exited", menu.name, menu.pid), cx);
+        }
+        cx.notify();
+    }
+
+    fn close_detail(&mut self, cx: &mut Context<Self>) {
+        self.detail = None;
+        cx.notify();
+    }
+
     fn request_signal(&mut self, signal: Signal, cx: &mut Context<Self>) {
         let Some(process) = self.table.selected() else {
             return;
@@ -313,7 +366,7 @@ impl ProcessBox {
             self.table.clear_filter();
             self.mode = Mode::Browse;
         } else {
-            self.detail = None;
+            self.close_detail(cx);
         }
         cx.notify();
     }
@@ -488,7 +541,21 @@ impl ProcessBox {
                             .text_color(theme.faint)
                             .child(row.guides.to_owned()),
                     )
-                    .child(div().flex_shrink_0().text_color(theme.muted).child(marker))
+                    .child(
+                        button(("fold", pid as usize), marker, &theme)
+                            .flex_shrink_0()
+                            .text_color(theme.muted)
+                            // The row's own click would select it, and a
+                            // quick second click on the marker would open
+                            // the details.
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                cx.stop_propagation();
+                                this.table.select_pid(pid);
+                                window.focus(&this.focus_handle);
+                                this.table.toggle_fold();
+                                cx.notify();
+                            })),
+                    )
                     .child(div().min_w_0().truncate().child(process.name.clone()));
                 columns(
                     self.name_width(),
@@ -506,7 +573,14 @@ impl ProcessBox {
                                 this.toggle_detail_for_selected(cx);
                             }
                             cx.notify();
-                        })),
+                        }))
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                window.focus(&this.focus_handle);
+                                this.open_menu(pid, event.position, cx);
+                            }),
+                        ),
                     right().child(pid.to_string()),
                     name,
                     div()
@@ -524,7 +598,12 @@ impl ProcessBox {
 
     /// btop's detail panel: the process's CPU over time on the left, its
     /// facts on the right, and the full command underneath.
-    fn render_detail(&self, detail: &Detail, theme: &Theme) -> impl IntoElement {
+    fn render_detail(
+        &self,
+        detail: &Detail,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let process = &detail.last;
         // One core fully busy is the least the graph scales to, so a
         // process ticking over at a few percent of a core stays small.
@@ -580,7 +659,13 @@ impl ProcessBox {
                     )
                     .child(div().text_color(state_color).child(state))
                     .child(div().flex_1())
-                    .child(div().text_color(theme.muted).child("esc closes")),
+                    .child(
+                        button("close-detail", "esc ✕", theme)
+                            .text_color(theme.muted)
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.close_detail(cx);
+                            })),
+                    ),
             )
             .child(
                 div()
@@ -668,17 +753,104 @@ impl ProcessBox {
             )
     }
 
+    /// The right-click menu's entries, each with the keys that do the same.
+    fn render_menu(&self, menu: &Menu, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let showing_detail = self
+            .detail
+            .as_ref()
+            .is_some_and(|detail| detail.pid == menu.pid);
+        let fold = self
+            .table
+            .selected_index()
+            .and_then(|index| self.table.row(index))
+            .map_or(Fold::Leaf, |row| row.fold);
+        let mut entries: Vec<(&'static str, Box<dyn Action>)> = vec![(
+            if showing_detail {
+                "hide details"
+            } else {
+                "details"
+            },
+            Box::new(ToggleDetail),
+        )];
+        match fold {
+            Fold::Open => entries.push(("fold", Box::new(ToggleFold))),
+            Fold::Closed => entries.push(("unfold", Box::new(ToggleFold))),
+            Fold::Leaf => {}
+        }
+        entries.push(("terminate…", Box::new(Terminate)));
+        entries.push(("kill…", Box::new(Kill)));
+
+        let (selected_bg, selected_fg) = (theme.selected_bg, theme.selected_fg);
+        let items = entries.into_iter().map(|(label, action)| {
+            let keys = keys::shown_for(action.as_ref()).unwrap_or_default();
+            div()
+                .id(label)
+                .h(px(ROW_HEIGHT))
+                .px_2()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_4()
+                .cursor_pointer()
+                .hover(move |style| style.bg(selected_bg).text_color(selected_fg))
+                .child(label)
+                .child(div().text_color(theme.muted).child(keys))
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.choose(action.as_ref(), window, cx);
+                }))
+        });
+        // Deferred so it paints over the boxes after this one, anchored so
+        // it flips inward near the window's edge.
+        deferred(
+            anchored()
+                .position(menu.position)
+                .snap_to_window_with_margin(px(4.0))
+                .child(
+                    div()
+                        .id("menu")
+                        .occlude()
+                        .min_w(chars(22.0))
+                        .py_1()
+                        .flex()
+                        .flex_col()
+                        .bg(theme.background)
+                        .border_1()
+                        .border_color(theme.proc_box)
+                        .rounded_md()
+                        .child(
+                            div()
+                                .px_2()
+                                .pb_1()
+                                .text_color(theme.title)
+                                .child(format!("{} ({})", menu.name, menu.pid)),
+                        )
+                        .children(items)
+                        .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                            if matches!(this.mode, Mode::Menu(_)) {
+                                this.mode = Mode::Browse;
+                                cx.notify();
+                            }
+                        })),
+                ),
+        )
+        .with_priority(1)
+    }
+
     fn render_footer(&self, theme: &Theme) -> impl IntoElement {
         let shown = format!("{}/{}", self.table.len(), self.table.total());
         let left: AnyElement = match &self.mode {
             Mode::Confirm(pending) => div()
+                .flex()
+                .gap_2()
                 .text_color(theme.highlight)
                 .child(format!(
-                    "Send {} to {} ({})?  y / n",
+                    "Send {} to {} ({})?",
                     pending.signal.name(),
                     pending.name,
                     pending.pid
                 ))
+                .child(action_button("confirm", "[y]es", Confirm, theme))
+                .child(action_button("cancel", "[n]o", Cancel, theme))
                 .into_any_element(),
             Mode::Filter => div()
                 .text_color(theme.title)
@@ -686,13 +858,19 @@ impl ProcessBox {
                 .into_any_element(),
             // A signal's result is brief, so it takes the filter's place
             // while it lasts.
-            Mode::Browse => match &self.status {
+            Mode::Browse | Mode::Menu(_) => match &self.status {
                 Some(status) => div()
                     .text_color(theme.title)
                     .child(status.text.clone())
                     .into_any_element(),
                 None if !self.table.filter().is_empty() => div()
-                    .child(format!("filter: {}  (esc clears)", self.table.filter()))
+                    .flex()
+                    .gap_2()
+                    .child(format!("filter: {}", self.table.filter()))
+                    .child(
+                        action_button("clear-filter", "esc ✕", ClearFilter, theme)
+                            .text_color(theme.muted),
+                    )
                     .into_any_element(),
                 None => div().into_any_element(),
             },
@@ -772,7 +950,7 @@ impl Render for ProcessBox {
             &theme,
             "proc",
             theme.proc_box,
-            Some(format!("{layout}{} by {}", direction(sort), sort.column.label()).into()),
+            format!("{layout}{} by {}", direction(sort), sort.column.label()),
         )
         .flex_1()
         .key_context(self.mode.key_context())
@@ -800,7 +978,7 @@ impl Render for ProcessBox {
         .children(
             self.detail
                 .as_ref()
-                .map(|detail| self.render_detail(detail, &theme)),
+                .map(|detail| self.render_detail(detail, &theme, cx)),
         )
         .child(self.render_header(&theme, cx))
         .child(
@@ -813,6 +991,10 @@ impl Render for ProcessBox {
             .flex_1(),
         )
         .child(self.render_footer(&theme))
+        .children(match &self.mode {
+            Mode::Menu(menu) => Some(self.render_menu(menu, &theme, cx)),
+            _ => None,
+        })
     }
 }
 
