@@ -7,6 +7,7 @@ mod history;
 mod keys;
 mod monitor;
 mod procs;
+mod psu;
 mod rates;
 mod sample;
 mod settings;

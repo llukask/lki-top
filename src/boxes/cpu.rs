@@ -6,6 +6,7 @@ use gpui::{Div, div, prelude::*, px};
 use crate::gpu::GpuSample;
 use crate::graph::{GraphStyle, Grow, graph, meter};
 use crate::history::History;
+use crate::psu::PsuSample;
 use crate::rates::Rates;
 use crate::sample::Snapshot;
 use crate::theme::Theme;
@@ -143,7 +144,8 @@ impl CpuBox {
                 "Load avg {:.2} {:.2} {:.2}",
                 snapshot.load_average[0], snapshot.load_average[1], snapshot.load_average[2]
             )))
-            .children(gpu_lines(&snapshot.gpus, theme));
+            .children(gpu_lines(&snapshot.gpus, theme))
+            .children(snapshot.psu.as_ref().map(|psu| psu_line(psu, theme)));
 
         panel(theme, "cpu", theme.cpu_box, Some(right.into())).child(
             div()
@@ -173,6 +175,41 @@ impl CpuBox {
                 .child(cores_box),
         )
     }
+}
+
+/// The power supply's output, under the GPUs: its model, a load meter
+/// against its rating when the model is known, the watts, and its
+/// temperature. "out" because the unit draws more from the wall.
+fn psu_line(psu: &PsuSample, theme: &Theme) -> Div {
+    let load = psu.rating_w.map(|rating| psu.output_w / rating);
+    let temperature = psu.temperature_c.map(|celsius| {
+        let level = celsius / psu.critical_c.unwrap_or(100.0);
+        div()
+            .text_color(theme.temperature.at(level))
+            .child(format!("{celsius:.0}°C"))
+    });
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .h(px(ROW_HEIGHT))
+        .child(
+            div()
+                .text_color(theme.muted)
+                .child(psu.model.unwrap_or("PSU")),
+        )
+        .child(
+            div()
+                .flex_1()
+                .h_full()
+                .children(load.map(|load| meter(load, theme.cached, theme.meter_empty))),
+        )
+        .child(
+            div()
+                .text_color(theme.cached.at(load.unwrap_or(0.0)))
+                .child(format!("{:.0}W out", psu.output_w)),
+        )
+        .children(temperature)
 }
 
 /// One line per GPU under the cores, like btop's: usage, VRAM,

@@ -13,6 +13,7 @@ use sysinfo::{
 };
 
 use crate::gpu::{AmdGpu, GpuSample};
+use crate::psu::{CorsairPsu, PsuSample};
 
 #[derive(Debug, Clone)]
 pub struct Snapshot {
@@ -22,6 +23,7 @@ pub struct Snapshot {
     pub interfaces: Vec<InterfaceSample>,
     pub disks: Vec<DiskSample>,
     pub gpus: Vec<GpuSample>,
+    pub psu: Option<PsuSample>,
     pub load_average: [f64; 3],
     pub uptime_secs: u64,
 }
@@ -144,6 +146,7 @@ pub struct Sampler {
     users: Users,
     user_names: HashMap<sysinfo::Uid, String>,
     gpus: Vec<AmdGpu>,
+    psu: Option<CorsairPsu>,
     /// When network and disk counters were last read, to turn the
     /// bytes since then into rates.
     last_refresh: Instant,
@@ -171,6 +174,7 @@ impl Sampler {
             users: Users::new_with_refreshed_list(),
             user_names: HashMap::new(),
             gpus: AmdGpu::find_all(Path::new("/sys/class/drm")),
+            psu: CorsairPsu::find(Path::new("/sys/class/hwmon")),
             last_refresh: Instant::now(),
             last_process_refresh: Instant::now(),
         };
@@ -202,6 +206,7 @@ impl Sampler {
             interfaces: self.interfaces(elapsed),
             disks: self.disks(elapsed),
             gpus: self.gpus.iter().filter_map(AmdGpu::sample).collect(),
+            psu: self.psu.as_ref().and_then(CorsairPsu::sample),
             load_average: [load.one, load.five, load.fifteen],
             uptime_secs: System::uptime(),
         }

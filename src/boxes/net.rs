@@ -274,6 +274,7 @@ mod tests {
                 .collect(),
             disks: Vec::new(),
             gpus: Vec::new(),
+            psu: None,
             load_average: [0.0; 3],
             uptime_secs: 0,
         }
