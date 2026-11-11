@@ -333,12 +333,7 @@ impl Sampler {
                 Some(uid) => user_name(&mut self.users, &mut self.user_names, uid),
                 None => String::new(),
             };
-            let command = process
-                .cmd()
-                .iter()
-                .map(|arg| arg.to_string_lossy())
-                .collect::<Vec<_>>()
-                .join(" ");
+            let command = command_line(process.cmd());
             processes.push(ProcessSample {
                 pid: pid.as_u32(),
                 parent: process.parent().map(|parent| parent.as_u32()),
@@ -405,6 +400,19 @@ fn parse_meminfo_kib(meminfo: &str, label: &str) -> Option<u64> {
         .and_then(|value| value.parse().ok())
 }
 
+/// The arguments as one line. An argument can hold newlines and tabs,
+/// such as the script of an `sh -c`, and the table's rows are one line
+/// tall, so control characters become spaces.
+fn command_line(args: &[std::ffi::OsString]) -> String {
+    args.iter()
+        .map(|arg| arg.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .map(|char| if char.is_control() { ' ' } else { char })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,5 +424,11 @@ mod tests {
                        Cached:         26214400 kB\n";
         assert_eq!(parse_meminfo_kib(meminfo, "Cached:"), Some(26_214_400));
         assert_eq!(parse_meminfo_kib(meminfo, "Shmem:"), None);
+    }
+
+    #[test]
+    fn a_multi_line_argument_fits_on_one_line() {
+        let args = ["sh", "-c", "set -e\n\tcargo build"].map(std::ffi::OsString::from);
+        assert_eq!(command_line(&args), "sh -c set -e  cargo build");
     }
 }
