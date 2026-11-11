@@ -31,8 +31,24 @@
           version = cargoToml.package.version;
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
-          nativeBuildInputs = with pkgs; [ pkg-config ];
+          nativeBuildInputs = with pkgs; [ pkg-config copyDesktopItems ];
           buildInputs = gpuiLibs;
+          # The window's Wayland app id is also `lki-top` (`src/main.rs`),
+          # which docks and launchers match against the entry's name.
+          desktopItems = [
+            (pkgs.makeDesktopItem {
+              name = "lki-top";
+              desktopName = "lki-top";
+              genericName = "System Monitor";
+              comment = cargoToml.package.description;
+              exec = "lki-top";
+              # The icon theme's system monitor icon; lki-top has none.
+              icon = "utilities-system-monitor";
+              categories = [ "System" "Monitor" ];
+              keywords = [ "btop" "top" "process" "cpu" "memory" "task" ];
+              startupWMClass = "lki-top";
+            })
+          ];
           postFixup = ''
             patchelf --add-rpath ${pkgs.lib.makeLibraryPath gpuiLibs} $out/bin/lki-top
           '';
